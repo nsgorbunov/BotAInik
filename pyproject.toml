@@ -1,0 +1,15 @@
+[project]
+name = "BotAInik"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    {name = "GlebIsrailevich", email = ""},
+]
+dependencies = ["bs4>=0.0.2", "langchain>=0.3.7", "langchain-community>=0.3.7", "langchain-chroma>=0.1.4"]
+requires-python = "==3.13.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+
+[tool.pdm]
+distribution = false
