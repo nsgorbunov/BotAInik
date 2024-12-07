@@ -1,19 +1,18 @@
-from html_parser import ml_handbook, Html_parser
-from splitter import Doc_Splitter
-import random
-import numpy as np
-from langchain_chroma import Chroma
+import os
+
+from dotenv import load_dotenv
+from html_parser import Html_parser, ml_handbook
+from icecream import ic
+from langchain.chains.question_answering import load_qa_chain
 from langchain_community.embeddings.sentence_transformer import (
-    SentenceTransformerEmbeddings
+    SentenceTransformerEmbeddings,
 )
 from langchain_community.retrievers import TFIDFRetriever
-from icecream import ic
 from langchain_mistralai.chat_models import ChatMistralAI
-from langchain.chains.question_answering import load_qa_chain
-from dotenv import load_dotenv
-import os
+from splitter import Doc_Splitter
+
 # Load environment variables
-load_dotenv('.env')
+load_dotenv(".env")
 
 api_key = os.environ["API_KEY"]
 
@@ -29,7 +28,6 @@ docs = Html_parser().web_page(certain_pages)
 # Recursive Chunking
 rec_splitter = Doc_Splitter(docs)
 splits = rec_splitter.paragraph_splitter()
-
 
 
 # create the open-source embedding function
@@ -59,10 +57,7 @@ retriever = TFIDFRetriever.from_documents(splits)
 # ADVANCED RAG - LLM MistralAI
 
 llm = ChatMistralAI(
-    mistral_api_key=api_key,
-    model="mistral-large-latest",
-    temperature=0,
-    max_retries=2
+    mistral_api_key=api_key, model="mistral-large-latest", temperature=0, max_retries=2
 )
 
 qa_chain = load_qa_chain(llm=llm, chain_type="stuff")
@@ -79,4 +74,3 @@ ic(initial_answer)
 # ic(docs[0].page_content)
 # ic(docs[1].page_content)
 # print(docs[:3])
-

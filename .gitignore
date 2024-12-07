@@ -6,6 +6,7 @@ data/
 # C extensions
 *.so
 __init__.py
+.ruff_cache
 .venv
 # Distribution / packaging
 .Python
