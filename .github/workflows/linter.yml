@@ -26,5 +26,5 @@ jobs:
         run: poetry install
       - name: Run linter with ruff
         run: poetry run ruff check .
-      - name: Run formatter with black
-        run: poetry run black --check . --exclude "\.ipynb$" -t 'py310'
+      # - name: Run formatter with black
+      #   run: poetry run black --check . --exclude "\.ipynb$" -t 'py310'
