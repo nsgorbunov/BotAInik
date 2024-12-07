@@ -2,7 +2,7 @@
 name = "parsers"
 version = "0.1.0"
 description = ""
-authors = ["GlebIsrailevich <glebusai308@gmail.com>"]
+authors = ["GlebIsrailevich <glebusai308@gmail.com>", "Anna Sidorova <anna.pav.sidorova@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
