@@ -1,5 +1,5 @@
 import os
-
+import re
 import bs4
 from langchain_community.document_loaders import WebBaseLoader
 
@@ -99,6 +99,29 @@ algorithms = [
 
 
 class Html_parser:
+    @staticmethod
+    def remove_headers(text):
+        header_patterns = [
+            r"^[А-ЯЁ\s]+:$",              
+            r"^[А-ЯЁ][^\n]{0,50}\n",      
+            r"^Вопрос на подумать.*?$",   
+            r"^Ответ.*?$"                 
+        ]
+        
+        for pattern in header_patterns:
+            text = re.sub(pattern, '', text, flags=re.MULTILINE)
+        lines = text.splitlines()
+        filtered_lines = []
+        for line in lines:
+            if len(line.strip()) < 10 or re.match(r"^\s*\d+\s*$", line) or len(line.split()) <= 2:
+                continue
+            filtered_lines.append(line)
+        
+        clean_text = '\n'.join(filtered_lines)
+        clean_text = re.sub(r'\n{2,}', '\n', clean_text)
+        
+        return clean_text
+
     def web_page(self, urls: list):
         loader = WebBaseLoader(
             # web_paths=("https://education.yandex.ru/handbook/algorithms/article/obhody-grafa",),
@@ -120,6 +143,10 @@ class Html_parser:
         )
 
         docs = loader.load()
+        for doc in docs:
+            doc.page_content = self.remove_headers(
+                doc.page_content
+                )
         return docs
 
         # with open('algorithms/page12.txt', 'w', encoding='utf-8') as file:
