@@ -1,0 +1,380 @@
+
+      
+      
+      
+      
+    
+  
+  
+      
+      
+      
+      
+    
+    
+      
+      
+      
+      
+    
+    
+      
+      
+      
+      
+    
+    
+      
+      
+      
+      
+    
+  
+
+
+Отлично, мы видим, что строки были скопированы, а столбец `comments` содержит отдельные комментарии! Теперь, когда мы закончили с Pandas, мы можем быстро вернуться к `Dataset`, загрузив `DataFrame` в память:
+
+```py
+from datasets import Dataset
+
+comments_dataset = Dataset.from_pandas(comments_df)
+comments_dataset
+```
+
+```python out
+Dataset({
+    features: ['html_url', 'title', 'comments', 'body'],
+    num_rows: 2842
+})
+```
+
+Хорошо, это дало нам несколько тысяч комментариев для работы!
+
+
+
+
+Теперь, когда у нас есть один комментарий в строке, давайте создадим новый столбец `comments_length`, содержащий количество слов в комментарии:
+
+```py
+comments_dataset = comments_dataset.map(
+    lambda x: {"comment_length": len(x["comments"].split())}
+)
+```
+
+Мы можем использовать этот новый столбец для фильтрации коротких комментариев, которые обычно содержат такие слова, как «cc @lewtun» или Thanks!», которые не имеют отношения к нашей поисковой системе. Нет точного числа для выбора порога числа слов, но около 15 слов кажется хорошим началом:
+
+```py
+comments_dataset = comments_dataset.filter(lambda x: x["comment_length"] > 15)
+comments_dataset
+```
+
+```python out
+Dataset({
+    features: ['html_url', 'title', 'comments', 'body', 'comment_length'],
+    num_rows: 2098
+})
+```
+
+Немного очистив наш набор данных, давайте соединим название issue, описание и комментарии вместе в новом столбце `text`. Как обычно, мы напишем простую функцию, которую мы можем передать в `Dataset.map()`:
+
+```py
+def concatenate_text(examples):
+    return {
+        "text": examples["title"]
+        + " \n "
+        + examples["body"]
+        + " \n "
+        + examples["comments"]
+    }
+
+
+comments_dataset = comments_dataset.map(concatenate_text)
+```
+
+Наконец-то мы готовы создать несколько эмбеддингов'! Давайте взглянем.
+
+## Создание текстовых эмбединнгов
+
+В Главе 2 мы видели, что можно получить эмбеддингов токенов с помощью класса AutoModel. Все, что нам нужно сделать, это выбрать подходящую контрольную точку для загрузки модели. К счастью, есть библиотека под названием `sentence-transformers`, предназначенная для создания эмбеддингов. Как описано в документации библиотеки, наш вариант использования является примером _асимметричного семантического поиска_ потому что у нас есть короткий запрос, ответ на который мы хотели бы найти в более длинном документе, например, в комментарии к проблеме. В удобной таблице обзора модели в документации указано, что контрольная точка `multi-qa-mpnet-base-dot-v1` имеет лучшую производительность для семантического поиска, поэтому мы будем использовать её для нашего приложения. Мы также загрузим токенизатор, используя ту же контрольную точку:
+
+{#if fw === 'pt'}
+
+```py
+from transformers import AutoTokenizer, AutoModel
+
+model_ckpt = "sentence-transformers/multi-qa-mpnet-base-dot-v1"
+tokenizer = AutoTokenizer.from_pretrained(model_ckpt)
+model = AutoModel.from_pretrained(model_ckpt)
+```
+Чтобы ускорить процесс построения эмбеддингов, рекомендуется переместить модель и входные данные на устройстве с графическим процессором, поэтому давайте сделаем это сейчас:
+
+```py
+import torch
+
+device = torch.device("cuda")
+model.to(device)
+```
+
+{:else}
+
+```py
+from transformers import AutoTokenizer, TFAutoModel
+
+model_ckpt = "sentence-transformers/multi-qa-mpnet-base-dot-v1"
+tokenizer = AutoTokenizer.from_pretrained(model_ckpt)
+model = TFAutoModel.from_pretrained(model_ckpt, from_pt=True)
+```
+
+Обратите внимание, что мы установили `from_pt=True` в качестве аргумента метода `from_pretrained()`. Это связано с тем, что контрольная точка `multi-qa-mpnet-base-dot-v1` имеет только веса PyTorch, поэтому установка `from_pt=True` автоматически преобразует их в формат TensorFlow для нас. Как видите, переключаться между фреймворками в  Трансформеры очень просто!
+
+{/if}
+
+Как мы упоминали ранее, мы хотели бы представить каждую запись в нашем корпусе issues GitHub как единый вектор, поэтому нам нужно каким-то образом «объединить» или усреднить наши вложения токенов. Одним из популярных подходов является выполнение *CLS pooling* выходных данных нашей модели, когда мы просто собираем последнее скрытое состояние для специального токена `[CLS]`. Следующая функция поможет нам:
+
+```py
+def cls_pooling(model_output):
+    return model_output.last_hidden_state[:, 0]
+```
+
+Далее мы создадим вспомогательную функцию, которая разметит список документов, поместит тензоры в GPU, передаст их в модель и, наконец, применит CLS pooling к выходным данным:
+
+{#if fw === 'pt'}
+
+```py
+def get_embeddings(text_list):
+    encoded_input = tokenizer(
+        text_list, padding=True, truncation=True, return_tensors="pt"
+    )
+    encoded_input = {k: v.to(device) for k, v in encoded_input.items()}
+    model_output = model(**encoded_input)
+    return cls_pooling(model_output)
+```
+Мы можем проверить работу функции, передав ей первую текстовую запись в нашем корпусе и проверив размерности данных на выходе:
+
+```py
+embedding = get_embeddings(comments_dataset["text"][0])
+embedding.shape
+```
+
+```python out
+torch.Size([1, 768])
+```
+
+Отлично, мы преобразовали первую запись в нашем корпусе в 768-мерный вектор! Мы можем использовать `Dataset.map()`, чтобы применить нашу функцию `get_embeddings()` к каждой строке в нашем корпусе, поэтому давайте создадим новый столбец `embeddings` следующим образом:
+
+```py
+embeddings_dataset = comments_dataset.map(
+    lambda x: {"embeddings": get_embeddings(x["text"]).detach().cpu().numpy()[0]}
+)
+```
+
+{:else}
+
+```py
+def get_embeddings(text_list):
+    encoded_input = tokenizer(
+        text_list, padding=True, truncation=True, return_tensors="tf"
+    )
+    encoded_input = {k: v for k, v in encoded_input.items()}
+    model_output = model(**encoded_input)
+    return cls_pooling(model_output)
+```
+Мы можем проверить работу функции, передав ей первую текстовую запись в нашем корпусе и проверив размерности данных на выходе:
+
+```py
+embedding = get_embeddings(comments_dataset["text"][0])
+embedding.shape
+```
+
+```python out
+TensorShape([1, 768])
+```
+Отлично, мы преобразовали первую запись в нашем корпусе в 768-мерный вектор! Мы можем использовать `Dataset.map()`, чтобы применить нашу функцию `get_embeddings()` к каждой строке в нашем корпусе, поэтому давайте создадим новый столбец `embeddings` следующим образом:
+
+```py
+embeddings_dataset = comments_dataset.map(
+    lambda x: {"embeddings": get_embeddings(x["text"]).numpy()[0]}
+)
+```
+
+{/if}
+
+Обратите внимание, что мы преобразовали вложения в массивы NumPy — это потому, что  Datasets требуют этого формата, когда мы пытаемся проиндексировать их с помощью FAISS, что мы сделаем дальше.
+
+
+## Использование FAISS для эффективного семантического поиска
+
+Теперь, когда у нас есть датасет с эмбеддингами, нам нужен способ поиска по ним. Для этого мы будем использовать специальную структуру данных из  Datasets, называемую _FAISS index_. FAISS (сокращение от Facebook AI Similarity Search) — это библиотека, предоставляющая эффективные алгоритмы для быстрого поиска и кластеризации эмбеддингов.
+
+Основная идея FAISS состоит в том, чтобы создать специальную структуру данных, называемую _index_, которая позволяет найти, какие эмбеддинги подобны входным эмбеддингам. Создать индекс FAISS в  Datasets очень просто — мы используем функцию `Dataset.add_faiss_index()` и указываем, какой столбец нашего набора данных мы хотим проиндексировать:
+
+```py
+embeddings_dataset.add_faiss_index(column="embeddings")
+```
+
+Теперь мы можем выполнять запросы к этому индексу, выполняя поиск ближайшего соседа с помощью функции `Dataset.get_nearest_examples()`. Давайте проверим это, сначала внедрив вопрос следующим образом:
+
+{#if fw === 'pt'}
+
+```py
+question = "How can I load a dataset offline?"
+question_embedding = get_embeddings([question]).cpu().detach().numpy()
+question_embedding.shape
+```
+
+```python out
+torch.Size([1, 768])
+```
+
+{:else}
+
+```py
+question = "How can I load a dataset offline?"
+question_embedding = get_embeddings([question]).numpy()
+question_embedding.shape
+```
+
+```python out
+(1, 768)
+```
+
+{/if}
+
+Как и в случае с документами, теперь у нас есть 768-мерный вектор, представляющий запрос, который мы можем сравнить со всем корпусом, чтобы найти наиболее похожие объекты:
+
+```py
+scores, samples = embeddings_dataset.get_nearest_examples(
+    "embeddings", question_embedding, k=5
+)
+```
+
+Функция `Dataset.get_nearest_examples()` возвращает набор оценок, которые ранжируют совпадение между запросом и документом, и соответствующий набор образцов (здесь 5 лучших совпадений). Давайте соберем их в `pandas.DataFrame`, чтобы мы могли легко их отсортировать:
+
+```py
+import pandas as pd
+
+samples_df = pd.DataFrame.from_dict(samples)
+samples_df["scores"] = scores
+samples_df.sort_values("scores", ascending=False, inplace=True)
+```
+
+Теперь мы можем пройтись по первым нескольким строкам, чтобы увидеть, насколько наш запрос соответствует имеющимся комментариям:
+
+```py
+for _, row in samples_df.iterrows():
+    print(f"COMMENT: {row.comments}")
+    print(f"SCORE: {row.scores}")
+    print(f"TITLE: {row.title}")
+    print(f"URL: {row.html_url}")
+    print("=" * 50)
+    print()
+```
+
+```python out
+"""
+COMMENT: Requiring online connection is a deal breaker in some cases unfortunately so it'd be great if offline mode is added similar to how `transformers` loads models offline fine.
+
+@mandubian's second bullet point suggests that there's a workaround allowing you to use your offline (custom?) dataset with `datasets`. Could you please elaborate on how that should look like?
+SCORE: 25.505046844482422
+TITLE: Discussion using datasets in offline mode
+URL: https://github.com/huggingface/datasets/issues/824
+==================================================
+
+COMMENT: The local dataset builders (csv, text , json and pandas) are now part of the `datasets` package since #1726 :)
+You can now use them offline
+\`\`\`python
+datasets = load_dataset("text", data_files=data_files)
+\`\`\`
+
+We'll do a new release soon
+SCORE: 24.555509567260742
+TITLE: Discussion using datasets in offline mode
+URL: https://github.com/huggingface/datasets/issues/824
+==================================================
+
+COMMENT: I opened a PR that allows to reload modules that have already been loaded once even if there's no internet.
+
+Let me know if you know other ways that can make the offline mode experience better. I'd be happy to add them :)
+
+I already note the "freeze" modules option, to prevent local modules updates. It would be a cool feature.
+
+----------
+
+> @mandubian's second bullet point suggests that there's a workaround allowing you to use your offline (custom?) dataset with `datasets`. Could you please elaborate on how that should look like?
+
+Indeed `load_dataset` allows to load remote dataset script (squad, glue, etc.) but also you own local ones.
+For example if you have a dataset script at `./my_dataset/my_dataset.py` then you can do
+\`\`\`python
+load_dataset("./my_dataset")
+\`\`\`
+and the dataset script will generate your dataset once and for all.
+
+----------
+
+About I'm looking into having `csv`, `json`, `text`, `pandas` dataset builders already included in the `datasets` package, so that they are available offline by default, as opposed to the other datasets that require the script to be downloaded.
+cf #1724
+SCORE: 24.14896583557129
+TITLE: Discussion using datasets in offline mode
+URL: https://github.com/huggingface/datasets/issues/824
+==================================================
+
+COMMENT: > here is my way to load a dataset offline, but it **requires** an online machine
+>
+> 1. (online machine)
+>
+> ```
+>
+> import datasets
+>
+> data = datasets.load_dataset(...)
+>
+> data.save_to_disk(/YOUR/DATASET/DIR)
+>
+> ```
+>
+> 2. copy the dir from online to the offline machine
+>
+> 3. (offline machine)
+>
+> ```
+>
+> import datasets
+>
+> data = datasets.load_from_disk(/SAVED/DATA/DIR)
+>
+> ```
+>
+>
+>
+> HTH.
+
+
+SCORE: 22.893993377685547
+TITLE: Discussion using datasets in offline mode
+URL: https://github.com/huggingface/datasets/issues/824
+==================================================
+
+COMMENT: here is my way to load a dataset offline, but it **requires** an online machine
+1. (online machine)
+\`\`\`
+import datasets
+data = datasets.load_dataset(...)
+data.save_to_disk(/YOUR/DATASET/DIR)
+\`\`\`
+2. copy the dir from online to the offline machine
+3. (offline machine)
+\`\`\`
+import datasets
+data = datasets.load_from_disk(/SAVED/DATA/DIR)
+\`\`\`
+
+HTH.
+SCORE: 22.406635284423828
+TITLE: Discussion using datasets in offline mode
+URL: https://github.com/huggingface/datasets/issues/824
+==================================================
+"""
+```
+
+Неплохо! Наше второе обращение, кажется, соответствует запросу.
+

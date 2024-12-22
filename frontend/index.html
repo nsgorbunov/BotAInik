@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>BotAInik: RAG-бот</title>
+
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$','$$'], ['\\[','\\]']]
+      },
+      options: {
+        // Пропускаем обработку в определённых тегах
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+      }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="header">
+    <img src="/static/robot_logo.png" alt="BotAInik Logo" class="logo" />
+    <h1 class="main-title">BotAInik</h1>
+  </header>
+
+  <!-- Основной контейнер чата -->
+  <div class="chat-container">
+
+    <div id="chat-window" class="chat-window">
+
+    </div>
+
+    <div class="input-container">
+      <textarea
+        id="user-input"
+        placeholder="Задайте вопрос..."
+      ></textarea>
+      <button id="send-btn">Спросить</button>
+    </div>
+  </div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>

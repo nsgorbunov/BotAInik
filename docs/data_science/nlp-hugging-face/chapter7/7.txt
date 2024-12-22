@@ -1,0 +1,528 @@
+
+
+На самом деле это демонстрация модели, которая была обучена и загружена на Hub с помощью кода, показанного в этом разделе. Вы можете найти ее и перепроверить прогнозы здесь.
+
+
+
+## Подготовка данных[[preparing-the-data]]
+
+В качестве академического бенчмарка для экстрактивных ответов на вопросы чаще всего используется датасет SQuAD, поэтому мы будем использовать именно его. Существует также более сложный датасет SQuAD v2, который включает вопросы, не имеющие ответа. Если ваш собственный датасет содержит столбец контекстов, столбец вопросов и столбец ответов, вы сможете адаптировать описанные ниже шаги.
+
+### Датасет SQuAD[[the-squad-dataset]]
+
+Как обычно, мы можем загрузить и кэшировать датасет всего за один шаг благодаря функции `load_dataset()`:
+
+```py
+from datasets import load_dataset
+
+raw_datasets = load_dataset("squad")
+```
+
+Мы можем взглянуть на этот объект, чтобы узнать больше о датасете SQuAD:
+
+```py
+raw_datasets
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['id', 'title', 'context', 'question', 'answers'],
+        num_rows: 87599
+    })
+    validation: Dataset({
+        features: ['id', 'title', 'context', 'question', 'answers'],
+        num_rows: 10570
+    })
+})
+```
+
+Похоже, у нас есть все необходимое в полях `context`, `question` и `answers`, так что давайте выведем их для первого элемента нашего обучающего набора:
+
+```py
+print("Context: ", raw_datasets["train"][0]["context"])
+print("Question: ", raw_datasets["train"][0]["question"])
+print("Answer: ", raw_datasets["train"][0]["answers"])
+```
+
+```python out
+Context: 'Architecturally, the school has a Catholic character. Atop the Main Building\'s gold dome is a golden statue of the Virgin Mary. Immediately in front of the Main Building and facing it, is a copper statue of Christ with arms upraised with the legend "Venite Ad Me Omnes". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette Soubirous in 1858. At the end of the main drive (and in a direct line that connects through 3 statues and the Gold Dome), is a simple, modern stone statue of Mary.'
+Question: 'To whom did the Virgin Mary allegedly appear in 1858 in Lourdes France?'
+Answer: {'text': ['Saint Bernadette Soubirous'], 'answer_start': [515]}
+```
+
+Поля `context` и `question` очень просты в использовании. С полем `answers` немного сложнее, поскольку оно представляет собой словарь с двумя полями, которые оба являются списками. Именно такой формат будет ожидать метрика `squad` при оценке; если вы используете свои собственные данные, вам не обязательно беспокоиться о том, чтобы привести ответы к такому же формату. Поле `text` довольно очевидно, а поле `answer_start` содержит индекс начального символа каждого ответа в контексте.
+
+Во время обучения существует только один возможный ответ. Мы можем перепроверить это с помощью метода `Dataset.filter()`:
+
+```py
+raw_datasets["train"].filter(lambda x: len(x["answers"]["text"]) != 1)
+```
+
+```python out
+Dataset({
+    features: ['id', 'title', 'context', 'question', 'answers'],
+    num_rows: 0
+})
+```
+
+Для оценки, однако, существует несколько возможных ответов для каждого примера, которые могут быть одинаковыми или разными:
+
+```py
+print(raw_datasets["validation"][0]["answers"])
+print(raw_datasets["validation"][2]["answers"])
+```
+
+```python out
+{'text': ['Denver Broncos', 'Denver Broncos', 'Denver Broncos'], 'answer_start': [177, 177, 177]}
+{'text': ['Santa Clara, California', "Levi's Stadium", "Levi's Stadium in the San Francisco Bay Area at Santa Clara, California."], 'answer_start': [403, 355, 355]}
+```
+
+Мы не будем углубляться в сценарий оценки, поскольку все это будет завернуто в метрику  Datasets для нас, но кратко суть в том, что некоторые вопросы имеют несколько возможных ответов, и этот сценарий будет сравнивать спрогнозированный ответ со всеми допустимыми ответами и выбирать лучший результат. Если мы посмотрим, например, на выборку с индексом 2:
+
+```py
+print(raw_datasets["validation"][2]["context"])
+print(raw_datasets["validation"][2]["question"])
+```
+
+```python out
+'Super Bowl 50 was an American football game to determine the champion of the National Football League (NFL) for the 2015 season. The American Football Conference (AFC) champion Denver Broncos defeated the National Football Conference (NFC) champion Carolina Panthers 24–10 to earn their third Super Bowl title. The game was played on February 7, 2016, at Levi\'s Stadium in the San Francisco Bay Area at Santa Clara, California. As this was the 50th Super Bowl, the league emphasized the "golden anniversary" with various gold-themed initiatives, as well as temporarily suspending the tradition of naming each Super Bowl game with Roman numerals (under which the game would have been known as "Super Bowl L"), so that the logo could prominently feature the Arabic numerals 50.'
+'Where did Super Bowl 50 take place?'
+```
+
+мы можем увидеть, что ответ действительно может быть одним из трех возможных вариантов, которые мы видели ранее.
+
+### Подготовка обучающих данных[[processing-the-training-data]]
+
+
+
+Теперь, когда мы шаг за шагом разобрались с предварительной обработкой обучающих данных, мы можем сгруппировать их в функцию, которую будем применять ко всему датасету. Мы дополним каждый признак до максимальной длины, которую мы задали, поскольку большинство контекстов будут длинными (и соответствующие образцы будут разбиты на несколько признаков), поэтому применение динамического дополнения здесь не имеет реальной пользы:
+
+```py
+max_length = 384
+stride = 128
+
+
+def preprocess_training_examples(examples):
+    questions = [q.strip() for q in examples["question"]]
+    inputs = tokenizer(
+        questions,
+        examples["context"],
+        max_length=max_length,
+        truncation="only_second",
+        stride=stride,
+        return_overflowing_tokens=True,
+        return_offsets_mapping=True,
+        padding="max_length",
+    )
+
+    offset_mapping = inputs.pop("offset_mapping")
+    sample_map = inputs.pop("overflow_to_sample_mapping")
+    answers = examples["answers"]
+    start_positions = []
+    end_positions = []
+
+    for i, offset in enumerate(offset_mapping):
+        sample_idx = sample_map[i]
+        answer = answers[sample_idx]
+        start_char = answer["answer_start"][0]
+        end_char = answer["answer_start"][0] + len(answer["text"][0])
+        sequence_ids = inputs.sequence_ids(i)
+
+        # Найдём начало и конец контекста
+        idx = 0
+        while sequence_ids[idx] != 1:
+            idx += 1
+        context_start = idx
+        while sequence_ids[idx] == 1:
+            idx += 1
+        context_end = idx - 1
+
+        # Если ответ не полностью находится внутри контекста, меткой будет (0, 0)
+        if offset[context_start][0] > start_char or offset[context_end][1] = context_start and offset[idx][1] >= end_char:
+                idx -= 1
+            end_positions.append(idx + 1)
+
+    inputs["start_positions"] = start_positions
+    inputs["end_positions"] = end_positions
+    return inputs
+```
+
+Обратите внимание, что мы определили две константы для определения максимальной длины и длины скользящего окна, а также добавили немного очистки перед токенизацией: некоторые вопросы в датасете SQuAD имеют лишние пробелы в начале и конце, которые ничего не добавляют (и занимают место при токенизации, если вы используете модель вроде RoBERTa), поэтому мы удалили эти лишние пробелы.
+
+Чтобы применить эту функцию ко всему обучающему набору, мы используем метод `Dataset.map()` с флагом `batched=True`. Это необходимо, так как мы изменяем длину датасета (поскольку один пример может давать несколько обучающих признаков):
+
+```py
+train_dataset = raw_datasets["train"].map(
+    preprocess_training_examples,
+    batched=True,
+    remove_columns=raw_datasets["train"].column_names,
+)
+len(raw_datasets["train"]), len(train_dataset)
+```
+
+```python out
+(87599, 88729)
+```
+
+Как мы видим, предварительная обработка добавила около 1 000 признаков. Теперь наш обучающий набор готов к использованию - давайте займемся предварительной обработкой валидационного набора!
+
+### Подготовка валидационных данных[[processing-the-validation-data]]
+
+Предварительная обработка валидационных данных будет немного проще, поскольку нам не нужно генерировать метки (если только мы не хотим вычислять потери на валидации, но это число не поможет нам понять, насколько хороша модель). Настоящей радостью будет интерпретация прогнозов модели в диапазонах исходного контекста. Для этого нам нужно хранить как сопоставления смещений, так и способ сопоставления каждого созданного признака с оригинальным примером, из которого он взят. Поскольку в исходном датасете есть столбец ID, мы будем использовать этот ID.
+
+Единственное, что мы добавим сюда, - это немного почистим сопоставления смещений. Они будут содержать смещения для вопроса и контекста, но на этапе постобработки у нас не будет возможности узнать, какая часть входных идентификаторов соответствует контексту, а какая - вопросу (метод `sequence_ids()`, который мы использовали, доступен только для выхода токенизатора). Поэтому мы установим смещения, соответствующие вопросу, в `None`:
+
+```py
+def preprocess_validation_examples(examples):
+    questions = [q.strip() for q in examples["question"]]
+    inputs = tokenizer(
+        questions,
+        examples["context"],
+        max_length=max_length,
+        truncation="only_second",
+        stride=stride,
+        return_overflowing_tokens=True,
+        return_offsets_mapping=True,
+        padding="max_length",
+    )
+
+    sample_map = inputs.pop("overflow_to_sample_mapping")
+    example_ids = []
+
+    for i in range(len(inputs["input_ids"])):
+        sample_idx = sample_map[i]
+        example_ids.append(examples["id"][sample_idx])
+
+        sequence_ids = inputs.sequence_ids(i)
+        offset = inputs["offset_mapping"][i]
+        inputs["offset_mapping"][i] = [
+            o if sequence_ids[k] == 1 else None for k, o in enumerate(offset)
+        ]
+
+    inputs["example_id"] = example_ids
+    return inputs
+```
+
+Мы можем применить эту функцию ко всему валидационому датасету, как и раньше:
+
+```py
+validation_dataset = raw_datasets["validation"].map(
+    preprocess_validation_examples,
+    batched=True,
+    remove_columns=raw_datasets["validation"].column_names,
+)
+len(raw_datasets["validation"]), len(validation_dataset)
+```
+
+```python out
+(10570, 10822)
+```
+
+В данном случае мы добавили всего пару сотен примеров, поэтому контексты в валидационном датасете немного короче.
+
+Теперь, когда мы предварительно обработали все данные, можно приступать к обучению.
+
+{#if fw === 'pt'}
+
+## Дообучение модели с API `Trainer`[[fine-tuning-the-model-with-the-trainer-api]]
+
+Код обучения для этого примера будет очень похож на код из предыдущих разделов -- самым сложным будет написание функции `compute_metrics()`. Поскольку мы дополнили все примеры до максимальной длины, которую мы задали, нет никакого коллатора данных, поэтому вычисление метрики - это единственное, о чем нам нужно беспокоиться. Самым сложным будет постобработка прогнозов модели в отрезки текста оригинальных примеров; как только мы это сделаем, метрика из библиотеки  Datasets сделает за нас большую часть работы.
+
+{:else}
+
+## Дообучение модели с Keras[[fine-tuning-the-model-with-keras]]
+
+Код обучения для этого примера будет очень похож на код в предыдущих разделах, но вычисление метрик будет уникальным. Поскольку мы дополнили все примеры до максимальной длины, которую мы задали, нет коллатора данных, который нужно определить, поэтому вычисление метрики - это единственное, о чем нам нужно беспокоиться. Самое сложное - это постобработка прогнозов модели в отрезки текста в исходных примерах; как только мы это сделаем, метрика из библиотеки  Datasets сделает за нас большую часть работы.
+
+{/if}
+
+### Постобработка[[post-processing]]
+
+{#if fw === 'pt'}
+
+
+
+Наконец, мы просто передаем все в класс `Trainer` и запускаем обучение:
+
+```python
+from transformers import Trainer
+
+trainer = Trainer(
+    model=model,
+    args=args,
+    train_dataset=train_dataset,
+    eval_dataset=validation_dataset,
+    tokenizer=tokenizer,
+)
+trainer.train()
+```
+
+{:else}
+
+```python
+from transformers.keras_callbacks import PushToHubCallback
+
+callback = PushToHubCallback(output_dir="bert-finetuned-squad", tokenizer=tokenizer)
+
+# Мы собираемся провести валидацию после обучения, поэтому не нужно проводить валидацию в середине обучения
+model.fit(tf_train_dataset, callbacks=[callback], epochs=num_train_epochs)
+```
+
+{/if}
+
+Обратите внимание, что во время обучения каждый раз, когда модель сохраняется (здесь - каждую эпоху), она загружается на Hub в фоновом режиме. Таким образом, при необходимости вы сможете возобновить обучение на другой машине. Все обучение занимает некоторое время (чуть больше часа на Titan RTX), поэтому во время его проведения вы можете выпить кофе или перечитать те части курса, которые показались вам более сложными. Также обратите внимание, что как только закончится первая эпоха, вы увидите, что некоторые веса загружены в Hub, и сможете начать играть с вашей моделью на ее странице.
+
+{#if fw === 'pt'}
+
+Когда обучение завершено, мы можем наконец оценить нашу модель (и помолиться, что не потратили все это время вычислений впустую). Метод `predict()` функции `Trainer` вернет кортеж, где первыми элементами будут предсказания модели (здесь пара с начальным и конечным логитами). Мы отправляем его в нашу функцию `compute_metrics()`:
+
+```python
+predictions, _, _ = trainer.predict(validation_dataset)
+start_logits, end_logits = predictions
+compute_metrics(start_logits, end_logits, validation_dataset, raw_datasets["validation"])
+```
+
+{:else}
+
+Когда обучение завершено, мы можем наконец оценить нашу модель (и помолиться, что не потратили все это время вычислений впустую). Метод `predict()` функции `Trainer` вернет кортеж, где первыми элементами будут предсказания модели (здесь пара с начальным и конечным логитами). Мы отправляем его в нашу функцию `compute_metrics()`:
+
+```python
+predictions = model.predict(tf_eval_dataset)
+compute_metrics(
+    predictions["start_logits"],
+    predictions["end_logits"],
+    validation_dataset,
+    raw_datasets["validation"],
+)
+```
+
+{/if}
+
+```python out
+{'exact_match': 81.18259224219489, 'f1': 88.67381321905516}
+```
+
+Отлично! Для сравнения, базовые показатели, указанные в статье BERT для этой модели, составляют 80,8 и 88,5, так что мы как раз там, где должны быть.
+
+{#if fw === 'pt'}
+
+Наконец, мы используем метод `push_to_hub()`, чтобы убедиться, что мы загрузили последнюю версию модели:
+
+```py
+trainer.push_to_hub(commit_message="Training complete")
+```
+
+Это возвращает URL только что выполненного коммита, если вы хотите его просмотреть:
+
+```python out
+'https://huggingface.co/sgugger/bert-finetuned-squad/commit/9dcee1fbc25946a6ed4bb32efb1bd71d5fa90b68'
+```
+
+`Trainer` также создает черновик карточки модели со всеми результатами оценки и загружает ее.
+
+{/if}
+
+На этом этапе вы можете использовать виджет инференса на Model Hub, чтобы протестировать модель и поделиться ею с друзьями, семьей и любимыми питомцами. Вы успешно провели дообучение модели для задачи ответа на вопрос - поздравляем!
+
+
+
+{#if fw === 'pt'}
+
+Если вы хотите более глубоко погрузиться в тренировочный цикл, мы покажем вам, как сделать то же самое с помощью  Accelerate.
+
+## Пользовательский цикл обучения[[a-custom-training-loop]]
+
+Теперь давайте посмотрим на полный цикл обучения, чтобы вы могли легко настроить нужные вам части. Он будет очень похож на цикл обучения в Главе 3, за исключением цикла оценки. Мы сможем регулярно оценивать модель, поскольку больше не ограничены классом `Trainer`.
+
+### Подготовим все для обучения[[preparing-everything-for-training]]
+
+Сначала нам нужно создать `DataLoader`ы из наших датасетов. Мы установим формат этих датасетов в `"torch"` и удалим столбцы в наборе валидации, которые не используются моделью. Затем мы можем использовать `default_data_collator`, предоставляемый Transformers, в качестве `collate_fn` и перемешаем обучающий набор, но не набор для валидации:
+
+```py
+from torch.utils.data import DataLoader
+from transformers import default_data_collator
+
+train_dataset.set_format("torch")
+validation_set = validation_dataset.remove_columns(["example_id", "offset_mapping"])
+validation_set.set_format("torch")
+
+train_dataloader = DataLoader(
+    train_dataset,
+    shuffle=True,
+    collate_fn=default_data_collator,
+    batch_size=8,
+)
+eval_dataloader = DataLoader(
+    validation_set, collate_fn=default_data_collator, batch_size=8
+)
+```
+
+Затем мы реинстанцируем нашу модель, чтобы убедиться, что мы не продолжаем дообучение, а снова начинаем с предварительно обученной модели BERT:
+
+```py
+model = AutoModelForQuestionAnswering.from_pretrained(model_checkpoint)
+```
+
+Тогда нам понадобится оптимизатор. Как обычно, мы используем классический `AdamW`, который похож на Adam, но с исправлением в способе применения затухания веса:
+
+```py
+from torch.optim import AdamW
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+```
+
+Когда у нас есть все эти объекты, мы можем отправить их в метод `accelerator.prepare()`. Помните, что если вы хотите обучать на TPU в блокноте Colab, вам нужно будет перенести весь этот код в функцию обучения, которая не должна выполнять ни одну ячейку, инстанцирующую `Accelerator`. Мы можем принудительно обучать со смешанной точностью, передав `fp16=True` в `Accelerator` (или, если вы выполняете код в виде скрипта, просто убедитесь, что заполнили  Accelerate `config` соответствующим образом).
+
+```py
+from accelerate import Accelerator
+
+accelerator = Accelerator(fp16=True)
+model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, eval_dataloader
+)
+```
+
+Как вы уже поняли из предыдущих разделов, мы можем использовать длину `train_dataloader` для вычисления количества шагов обучения только после того, как она пройдет через метод `accelerator.prepare()`. Мы используем тот же линейный график, что и в предыдущих разделах:
+
+```py
+from transformers import get_scheduler
+
+num_train_epochs = 3
+num_update_steps_per_epoch = len(train_dataloader)
+num_training_steps = num_train_epochs * num_update_steps_per_epoch
+
+lr_scheduler = get_scheduler(
+    "linear",
+    optimizer=optimizer,
+    num_warmup_steps=0,
+    num_training_steps=num_training_steps,
+)
+```
+
+Чтобы отправить нашу модель на Hub, нам нужно создать объект `Repository` в рабочей папке. Сначала войдите в Hub Hugging Face, если вы еще не вошли в него. Мы определим имя розитория по идентификатору модели, который мы хотим присвоить нашей модели (не стесняйтесь заменить `repo_name` на свое усмотрение; оно просто должно содержать ваше имя пользователя, что и делает функция `get_full_repo_name()`):
+
+```py
+from huggingface_hub import Repository, get_full_repo_name
+
+model_name = "bert-finetuned-squad-accelerate"
+repo_name = get_full_repo_name(model_name)
+repo_name
+```
+
+```python out
+'sgugger/bert-finetuned-squad-accelerate'
+```
+
+Затем мы можем клонировать этот розиторий в локальную папку. Если она уже существует, эта локальная папка должна быть клоном того розитория, с которым мы работаем:
+
+```py
+output_dir = "bert-finetuned-squad-accelerate"
+repo = Repository(output_dir, clone_from=repo_name)
+```
+
+Теперь мы можем загрузить все, что сохранили в `output_dir`, вызвав метод `repo.push_to_hub()`. Это поможет нам загружать промежуточные модели в конце каждой эпохи.
+
+### Цикл обучения[[training-loop]]
+
+Теперь мы готовы написать полный цикл обучения. После определения прогресс-бара, чтобы следить за ходом обучения, цикл состоит из трех частей:
+
+- Собственно обучение, которое представляет собой классическую итерацию по `train_dataloader`, прямой проход по модели, затем обратный проход и шаг оптимизатора.
+- Оценка, в которой мы собираем все значения для `start_logits` и `end_logits` перед преобразованием их в массивы NumPy. После завершения цикла оценки мы объединяем все результаты. Обратите внимание, что нам нужно произвести усечение, потому что `Accelerator` может добавить несколько примеров в конце, чтобы убедиться, что у нас одинаковое количество примеров в каждом процессе.
+- Сохранение и загрузка, где мы сначала сохраняем модель и токенизатор, а затем вызываем `repo.push_to_hub()`. Как и раньше, мы используем аргумент `blocking=False`, чтобы указать библиотеке  Hub на асинхронный процесс push. Таким образом, обучение продолжается нормально, а эта (длинная) инструкция выполняется в фоновом режиме.
+
+Вот полный код цикла обучения:
+
+```py
+from tqdm.auto import tqdm
+import torch
+
+progress_bar = tqdm(range(num_training_steps))
+
+for epoch in range(num_train_epochs):
+    # Обучение
+    model.train()
+    for step, batch in enumerate(train_dataloader):
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+        progress_bar.update(1)
+
+    # Оценка
+    model.eval()
+    start_logits = []
+    end_logits = []
+    accelerator.print("Evaluation!")
+    for batch in tqdm(eval_dataloader):
+        with torch.no_grad():
+            outputs = model(**batch)
+
+        start_logits.append(accelerator.gather(outputs.start_logits).cpu().numpy())
+        end_logits.append(accelerator.gather(outputs.end_logits).cpu().numpy())
+
+    start_logits = np.concatenate(start_logits)
+    end_logits = np.concatenate(end_logits)
+    start_logits = start_logits[: len(validation_dataset)]
+    end_logits = end_logits[: len(validation_dataset)]
+
+    metrics = compute_metrics(
+        start_logits, end_logits, validation_dataset, raw_datasets["validation"]
+    )
+    print(f"epoch {epoch}:", metrics)
+
+    # Сохранение и загрузка
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(output_dir)
+        repo.push_to_hub(
+            commit_message=f"Training in progress epoch {epoch}", blocking=False
+        )
+```
+
+Если вы впервые видите модель, сохраненную с помощью  Accelerate, давайте посмотрим на три строки кода, которые с этим связаны:
+
+```py
+accelerator.wait_for_everyone()
+unwrapped_model = accelerator.unwrap_model(model)
+unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+```
+
+Первая строка не требует пояснений: она предписывает всем процессам подождать, пока все не окажутся на этой стадии, прежде чем продолжить работу. Это нужно для того, чтобы убедиться, что у нас одна и та же модель в каждом процессе перед сохранением. Затем мы захватываем `unwrapped_model`, которая является базовой моделью, которую мы определили. Метод `accelerator.prepare()` изменяет модель для работы в распределенном обучении, поэтому у нее больше не будет метода `save_pretrained()`; метод `accelerator.unwrap_model()` отменяет этот шаг. Наконец, мы вызываем `save_pretrained()`, но указываем этому методу использовать `accelerator.save()` вместо `torch.save()`.
+
+После этого у вас должна получиться модель, которая дает результаты, очень похожие на модель, обученную с помощью `Trainer`. Вы можете проверить модель, которую мы обучили с помощью этого кода, на *huggingface-course/bert-finetuned-squad-accelerate*. А если вы хотите протестировать какие-либо изменения в цикле обучения, вы можете напрямую реализовать их, отредактировав код, показанный выше!
+
+{/if}
+
+## Использование дообученной модели[[using-the-fine-tuned-model]]
+
+Мы уже показали вам, как можно использовать модель, дообучение которой мы проводили на Model Hub, с помощью виджета инференса. Чтобы использовать ее локально в `pipeline`, нужно просто указать идентификатор модели:
+
+```py
+from transformers import pipeline
+
+# Замените здесь на выбранную вами контрольную точку
+model_checkpoint = "huggingface-course/bert-finetuned-squad"
+question_answerer = pipeline("question-answering", model=model_checkpoint)
+
+context = """
+ Transformers is backed by the three most popular deep learning libraries — Jax, PyTorch and TensorFlow — with a seamless integration
+between them. It's straightforward to train your models with one before loading them for inference with the other.
+"""
+question = "Which deep learning libraries back  Transformers?"
+question_answerer(question=question, context=context)
+```
+
+```python out
+{'score': 0.9979003071784973,
+ 'start': 78,
+ 'end': 105,
+ 'answer': 'Jax, PyTorch and TensorFlow'}
+```
+
+Отлично! Наша модель работает так же хорошо, как и модель по умолчанию для этого конвейера!

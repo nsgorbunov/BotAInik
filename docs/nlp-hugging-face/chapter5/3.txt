@@ -1,0 +1,496 @@
+# Препарируем  Datasets
+
+
+
+Далее нормализуем все лейблы столбца `condition` с применением `Dataset.map()`. Так же, как мы делали токенизацию в главе 3, мы можем определить простую функцию, которая будет применения для всех строк каждого сплита в `drug_dataset`:
+
+```py
+def lowercase_condition(example):
+    return {"condition": example["condition"].lower()}
+
+
+drug_dataset.map(lowercase_condition)
+```
+
+```python out
+AttributeError: 'NoneType' object has no attribute 'lower'
+```
+
+О нет! При запуске этой функции мы столкнулись с проблемой! Из ошибки мы можем сделать вывод, что некоторые записи в колонке `condition` являются `None`, которые не могут быть приведены к нижнему регистру как обычные строковые типы данных. Давайте удалим эти строки с помощью `Dataset.filter()`, которая работает схожим с `Dataset.map()` образом и принимает на вход один экземпляр датасета. Вместо реализации собственной функции: 
+
+```py
+def filter_nones(x):
+    return x["condition"] is not None
+```
+
+и вызова этой функции `drug_dataset.filter(filter_nones)`, мы можем сделать то же самое с помощью _lambda-функции_. В Python лямбда-функции - это небольшие функции, которые вы можете определить без явного их именования. Общий вид, которым их можно задать: 
+
+```
+lambda 
+
+Давайте применим функцию `Dataset.filter()` для удаления отзывов, содержащих меньше 30 слов. Схожим образом мы применяли её для столбца  `condition`: мы можем отфильтровать отзывы, в которых число слов меньше порога:
+
+```py
+drug_dataset = drug_dataset.filter(lambda x: x["review_length"] > 30)
+print(drug_dataset.num_rows)
+```
+
+```python out
+{'train': 138514, 'test': 46108}
+```
+
+Как вы можете увидеть, эта функция удалила около 15% отзывов из наших исходных обучающих и тестовых наборов данных. 
+
+
+
+Последняя вещь, которую нам необходимо сделать, это справиться с присутствием HTML-кодами символов в наших отзывах. Мы можем использовать модуль `html` и метод `unescape()` чтобы избавиться от них: 
+
+```py
+import html
+
+text = "I&#039;m a transformer called BERT"
+html.unescape(text)
+```
+
+```python out
+"I'm a transformer called BERT"
+```
+
+Для этого будем использовать `Dataset.map()` на всем нашем корпусе текстов: 
+
+```python
+drug_dataset = drug_dataset.map(lambda x: {"review": html.unescape(x["review"])})
+```
+
+Как видите, метод `Dataset.map()` крайне полезен для препроцессинга данных -- хотя мы и воспользовались только малой частью его возможностей!
+
+## Суперспособности метода `map()`
+
+Метод `Dataset.map()` принимает аргумент `batched`, который, если установлен в значение `True`, заставляет его сразу отправлять батч элементов в функцию `map()` (размер батча можно настроить, но по умолчанию он равен 1000). Например, предыдущая функция `map()`, которая экранировала весь HTML-код, требовала некоторого времени для запуска (вы можете узнать время взглянув на индикаторы выполнения процесса). Мы можем ускорить это, обрабатывая несколько элементов одновременно, используя list comprehension.
+
+Когда вы указываете `batched=True`, функция получает словарь с полями набора данных, но каждое значение теперь представляет собой _список значений_, а не просто одно значение. Возвращаемое значение `Dataset.map()` должно быть одинаковым: словарь с полями, которые мы хотим обновить или добавить в наш набор данных, и список значений. Например, вот еще один способ устранить все символы HTML, но с использованием `batched=True`:
+
+```python
+new_drug_dataset = drug_dataset.map(
+    lambda x: {"review": [html.unescape(o) for o in x["review"]]}, batched=True
+)
+```
+
+Если вы запустите этот код в блокноте, вы увидите, что эта команда выполняется намного быстрее, чем предыдущая. И это не потому, что наши отзывы уже были HTML-экранированными — если вы повторно выполните инструкцию из предыдущего раздела (без `batched=True`), это займет столько же времени, сколько и раньше. Это связано с тем, что обработка списков обычно выполняется быстрее, чем выполнение того же кода в цикле `for`, мы также повышаем производительность за счет одновременного доступа к множеству элементов, а не по одному.
+
+Использование `Dataset.map()` с `batched=True` – хороший способ «разблокировать» скоростные ограничения "быстрых" токенизаторов, с которыми мы познакомимся в главе 6, которые могут быстро токенизировать большие списки текста. Например, чтобы токенизировать все отзывы на лекарства с помощью быстрого токенизатора, мы можем использовать функцию, подобную этой:  
+
+```python
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+
+
+def tokenize_function(examples):
+    return tokenizer(examples["review"], truncation=True)
+```
+
+Как вы видели в главе 3, мы можем передать один или несколько элементов в токенизатор, так что мы можем использовать эту функцию без параметра `batched=True`. Давайте воспользуемся этой возможностью и сравним производительность. В ноутбуке можно замерить время выполнения функции путем добавления `%time` перед строкой кода, время исполнения которой вы хотите измерить: 
+
+```python no-format
+%time tokenized_dataset = drug_dataset.map(tokenize_function, batched=True)
+```
+
+Также присутствует возможность измерить время выполнения всей ячейки: нужно заменить `%time` на `%%time` в начале ячейки. На нашем оборудовании это заняло 10.8 секунд. Это значение расположено после слов "Wall time".
+
+
+
+Вот результаты, которые мы получили без и с применением батчинга, и двумя разными по скорости токенизаторами: 
+
+Options         | Fast tokenizer | Slow tokenizer
+:--------------:|:--------------:|:-------------:
+`batched=True`  | 10.8s          | 4min41s
+`batched=False` | 59.2s          | 5min3s
+
+По результатам видно, что использование быстрого токенизатора с параметром `batched=True` приводит к ускорению выполнения в 30 раз – это потрясающе! Это главная причина, почему быстрые токенизаторы применяются по умолчанию при использовании класса `AutoTokenizer` (и почему они называются "быстрыми"). Возможность достичь такой скорости выполнения достигается засчет исполнения кода токенизаторов на языке Rust, который легко позволяет распараллелить выполнение кода. 
+
+Параллелизация также позволяет почти в 6 раз ускорить быстрые токенизаторы с использованием `batched=True`: вы не можете пареллелизовать едничную операцию токенизации, но когда вы токенизируете много различных текстов одновременно, вы можете распределить выполнение на несколько процессов, каждый из которых будет отвечать за собственный текст. 
+
+`Dataset.map()` также обладает возможностями параллелизации. Поскольку метод не реализован на Rust, он не позволят "медленному" токенизатору "догнать" быстрый, но все же может быть полезен (особенно если вы используете токенизатор, у которого нет быстрой версии). Чтобы включить многопроцессорность, используйте аргумент `num_proc` и укажите количество процессов, которые будут использоваться в вашем вызове `Dataset.map()`:
+
+```py
+slow_tokenizer = AutoTokenizer.from_pretrained("bert-base-cased", use_fast=False)
+
+
+def slow_tokenize_function(examples):
+    return slow_tokenizer(examples["review"], truncation=True)
+
+
+tokenized_dataset = drug_dataset.map(slow_tokenize_function, batched=True, num_proc=8)
+```
+
+Вы можете поэкспериментировать и выяснить, какое число `num_proc` даст наилучший результат, в нашем случае значение 8 стало оптимальным. Вот значения, которые мы получили с и без использования мультипроцессинга: 
+
+Options         | Fast tokenizer | Slow tokenizer
+:--------------:|:--------------:|:-------------:
+`batched=True`  | 10.8s          | 4min41s
+`batched=False` | 59.2s          | 5min3s
+`batched=True`, `num_proc=8`  | 6.52s          | 41.3s
+`batched=False`, `num_proc=8` | 9.49s          | 45.2s
+
+Это гораздо более разумные результаты для "медленного" токенизатора, но производительность быстрого токенизатора также существенно выросла. Однако, обратите внимание, что это не всегда так — для значений `num_proc`, отличных от 8, наши тесты показали, что быстрее использовать `batched=True` без этой опции. Как правило, мы не рекомендуем использовать мультипроцессинг Python для "быстрых" токенизаторов с параметром `batched=True`.
+
+
+
+Объединение всей этой функциональности во всего лишь один метод само по себе прекрасно, но это еще не все! Используя `Dataset.map()` и `batched=True` вы можете поменять число элементов в датасете. Это очень полезно во множестве ситуаций, например, когда вы хотите создать несколько обучающих признаков из одного экземпляра текста. Мы воспользуеся этой возможностью на этапе препроцессинга для нескольких NLP-задач, которые рассмотрим в главе 7
+
+
+
+Давайте посмотрим как это работает! В этом примере мы токенизируем наши тексты и обрежем их до максимальной длины в 128, однако мы попросим токенизатор вернуть нам *все* получившиеся токены, а не только начальные. Это может быть сделано с помощью параметра `return_overflowing_tokens=True`: 
+
+```py
+def tokenize_and_split(examples):
+    return tokenizer(
+        examples["review"],
+        truncation=True,
+        max_length=128,
+        return_overflowing_tokens=True,
+    )
+```
+
+Давайте протестируем это на одном тексте прежде, чем использовать `Dataset.map()` на всем датасете: 
+
+```py
+result = tokenize_and_split(drug_dataset["train"][0])
+[len(inp) for inp in result["input_ids"]]
+```
+
+```python out
+[128, 49]
+```
+
+Итак, наш первый текст в обучающей части выборки стал состоять из двух признаков, т.к. токенизатор токенизировал не только первые 128 элементов, но и оставшиеся 49 тоже. Давайте применим токенизатор ко всем элементам датасета!
+
+```py
+tokenized_dataset = drug_dataset.map(tokenize_and_split, batched=True)
+```
+
+```python out
+ArrowInvalid: Column 1 named condition expected length 1463 but got length 1000
+```
+
+О, нет! Не сработало! Почему? Посмотрим на ошибку: несовпадение в длинах, один из которых длиной 1463, а другой – 1000. Если вы обратитесь в документацию `Dataset.map()`, вы можете увидеть, что одно из этих чисел – число объектов, поданных на вход функции, а другое –
+
+Проблема заключается в том, что мы пытаемся смешать два разных датасета разной размерности: число колонок датасета `drug_dataset` равняется 1000, а нужный нам `tokenized_dataset` имеет 1463 колонки. Чтобы избежать этой ошибки, необходимо удалить несколько столбцов из старого датасета и сделать оба датасета одинакового размера. Мы можем достичь этого с помощью аргумента `remove_columns`: 
+
+```py
+tokenized_dataset = drug_dataset.map(
+    tokenize_and_split, batched=True, remove_columns=drug_dataset["train"].column_names
+)
+```
+
+Теперь это работает без ошибок. Мы можем проверить, что наш новый датасет имеет бОльшее число элементов, просто сравним длины датасетов: 
+
+```py
+len(tokenized_dataset["train"]), len(drug_dataset["train"])
+```
+
+```python out
+(206772, 138514)
+```
+
+Мы упоминали о том, что мы можем справиться с несовпадением длин путем исправления числа колонок старого датасета. Чтобы сделать это, нам необходимо получить поле `overflow_to_sample_mapping`, которое вернет нам токенизатор, если мы зададим аргумент `return_overflowing_tokens=True`. Это даст нам необходимое соответствие между индексом новых и старых признаков. После этого мы сможем ассоциировать каждый ключ нашего оригинального датасета со списком значений нужного размера, повторяя значения каждого примера столько раз, сколько он генерирует новые функции:
+
+Для этого нам понадобится поле `overflow_to_sample_mapping`, которое возвращает токенизатор, когда мы устанавливаем `return_overflowing_tokens=True`. Это дает нам сопоставление индекса новой функции с индексом выборки, из которой он произошел. Используя это, мы можем связать каждый ключ, присутствующий в нашем исходном наборе данных, со списком значений нужного размера, повторяя значения каждого примера столько раз, сколько он генерирует новые функции:
+
+```py
+def tokenize_and_split(examples):
+    result = tokenizer(
+        examples["review"],
+        truncation=True,
+        max_length=128,
+        return_overflowing_tokens=True,
+    )
+    # Extract mapping between new and old indices
+    sample_map = result.pop("overflow_to_sample_mapping")
+    for key, values in examples.items():
+        result[key] = [values[i] for i in sample_map]
+    return result
+```
+
+Мы можем убедиться, что это сработало в `Dataset.map()` и без удаления старых столбцов: 
+
+```py
+tokenized_dataset = drug_dataset.map(tokenize_and_split, batched=True)
+tokenized_dataset
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['attention_mask', 'condition', 'date', 'drugName', 'input_ids', 'patient_id', 'rating', 'review', 'review_length', 'token_type_ids', 'usefulCount'],
+        num_rows: 206772
+    })
+    test: Dataset({
+        features: ['attention_mask', 'condition', 'date', 'drugName', 'input_ids', 'patient_id', 'rating', 'review', 'review_length', 'token_type_ids', 'usefulCount'],
+        num_rows: 68876
+    })
+})
+```
+
+Мы получаем то же количество признаков, что и раньше, но здесь мы сохранили все старые поля. Если они вам нужны для некоторой постобработки после применения вашей модели, вы можете использовать этот подход.
+
+Теперь вы видели, как  Datasets можно использовать для предварительной обработки набора данных различными способами. Хотя функции обработки  Datasets покроют большую часть ваших потребностей в обучении модели,
+могут быть случаи, когда вам нужно будет переключиться на Pandas, чтобы получить доступ к более мощным функциям, таким как `DataFrame.groupby()` или API высокого уровня для визуализации. К счастью,  Datasets предназначены для взаимодействия с такими библиотеками, как Pandas, NumPy, PyTorch, TensorFlow и JAX. Давайте посмотрим, как это работает.
+
+## От `Dataset`а к `DataFrame`ам и назад
+
+
+      
+      
+      
+      
+      
+      
+      
+      
+    
+  
+  
+      
+      
+      
+      
+      
+      
+      
+      
+    
+    
+      
+      
+      
+      
+      
+      
+      
+      
+    
+    
+      
+      
+      
+      
+      
+      
+      
+      
+    
+  
+
+
+Давайте создадим `pandas.DataFrame` для всего обучающего множества, выбрав все элементы из `drug_dataset["train"]`:
+
+```py
+train_df = drug_dataset["train"][:]
+```
+
+
+
+Начиная с этого момента мы можем использовать всю функциональность Pandas. Например, мы можем иначе посчитать расределение `condition` среди нашей выборки: 
+
+```py
+frequencies = (
+    train_df["condition"]
+    .value_counts()
+    .to_frame()
+    .reset_index()
+    .rename(columns={"index": "condition", "condition": "frequency"})
+)
+frequencies.head()
+```
+
+
+      
+      
+    
+  
+  
+      
+      
+    
+    
+      
+      
+    
+    
+      
+      
+    
+    
+      
+      
+    
+    
+      
+      
+    
+  
+
+
+
+И как только мы закончим наш анализ Pandas, мы всегда можем создать новый объект `Dataset` с помощью функции `Dataset.from_pandas()` следующим образом:
+
+```py
+from datasets import Dataset
+
+freq_dataset = Dataset.from_pandas(frequencies)
+freq_dataset
+```
+
+```python out
+Dataset({
+    features: ['condition', 'frequency'],
+    num_rows: 819
+})
+```
+
+
+
+На этом мы заканчиваем наш обзор различных техник препроцессинга, доступных в  Datasets. Чтобы завершить этот раздел, давайте создадим валидационную часть выборки. Прежде, чем сделать это, мы сбросим формат `drug_dataset` обратно к `"arrow"`: 
+
+```python
+drug_dataset.reset_format()
+```
+
+## Создание валидационной выборки
+
+Хотя у нас есть тестовая часть датасета, которую мы могли бы использовать для оценки качества модели, хорошей практикой является оставить тестовое множество нетронутым и создать отдельный набор для проверки. Как только вы будете довольны производительностью своих моделей на валидационном датасете, вы можете выполнить окончательную проверку работоспособности на тестовом. Этот процесс помогает снизить риск переобучения модели и промышленного применения модели, которая не работает на реальных данных.
+
+ Наборы данных предоставляют функцию `Dataset.train_test_split()`, основанную на известной функциональности из `scikit-learn`. Давайте используем её, чтобы разделить наш обучающий датасет непосредственно на обучающий и валидационный (мы устанавливаем аргумент `seed` для воспроизводимости):
+
+```py
+drug_dataset_clean = drug_dataset["train"].train_test_split(train_size=0.8, seed=42)
+# Переименуем "test"  в "validation"
+drug_dataset_clean["validation"] = drug_dataset_clean.pop("test")
+# Добавим "test" в наш `DatasetDict`
+drug_dataset_clean["test"] = drug_dataset["test"]
+drug_dataset_clean
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length', 'review_clean'],
+        num_rows: 110811
+    })
+    validation: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length', 'review_clean'],
+        num_rows: 27703
+    })
+    test: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length', 'review_clean'],
+        num_rows: 46108
+    })
+})
+```
+
+Отлично, теперь мы подготовили датасет, на котором можно обучить некоторые модели. В разделе 5 мы покажем, как загрузить датасеты на Hugging Face Hub, а пока закончим наш обзор и посмотрим несколько способов сохранения датасетов на локальный компьютер. 
+
+## Сохранение датасетов
+
+
+
+Несмотря на то, что  Datasets будут кэшировать все загруженные датасеты и операции, которые над ними выполняются, будут случаи, когда вам будет необходимо сохранить датасет на диск (например, если кэш был очищен). Как показано в таблице ниже,   Datasets предоставляет три главных функции для сохранения датасета в разных форматах. 
+
+| Data format |        Function        |
+| :---------: | :--------------------: |
+|    Arrow    | `Dataset.save_to_disk()` |
+|     CSV     |    `Dataset.to_csv()`    |
+|    JSON     |   `Dataset.to_json()`    |
+
+Для примера сохраним наш очищенный датасет в формате Arrow: 
+
+```py
+drug_dataset_clean.save_to_disk("drug-reviews")
+```
+
+Эта функция создаст директорию следующей структуры: 
+
+```
+drug-reviews/
+ dataset_dict.json
+ test
+    dataset.arrow
+    dataset_info.json
+    state.json
+ train
+    dataset.arrow
+    dataset_info.json
+    indices.arrow
+    state.json
+ validation
+     dataset.arrow
+     dataset_info.json
+     indices.arrow
+     state.json
+```
+
+где мы можем увидеть каждый сплит данных, ассоциированный с собственной таблицей *dataset.arrow*, и некоторыми метаданными, хранящимися в файлах *dataset_info.json* и *state.json*. Вы можете рассматривать формат Arrow просто как таблицу, которая оптимизирована для построения высокопроизводительных приложений для обработки и передачи больших датасетов. 
+
+После сохранения датасета мы можем загрузить его с использованием функции `load_from_disk()` следующим образом: 
+
+```py
+from datasets import load_from_disk
+
+drug_dataset_reloaded = load_from_disk("drug-reviews")
+drug_dataset_reloaded
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length'],
+        num_rows: 110811
+    })
+    validation: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length'],
+        num_rows: 27703
+    })
+    test: Dataset({
+        features: ['patient_id', 'drugName', 'condition', 'review', 'rating', 'date', 'usefulCount', 'review_length'],
+        num_rows: 46108
+    })
+})
+```
+
+Для форматов CSV и JSON мы должны сохранять каждый сплит как отдельный файл. Один из способов это сделать – проитерироваться по ключам и значениям в объекте `DatasetDict`: 
+
+```py
+for split, dataset in drug_dataset_clean.items():
+    dataset.to_json(f"drug-reviews-{split}.jsonl")
+```
+
+Этот код сохранит каждый блок нашего датасета в формате JSON Lines, где каждая строка будет сохранена как JSON-объект. Вот как будет выглядеть первый элемент нашей выборки: 
+
+```py
+!head -n 1 drug-reviews-train.jsonl
+```
+
+```python out
+{"patient_id":141780,"drugName":"Escitalopram","condition":"depression","review":"\"I seemed to experience the regular side effects of LEXAPRO, insomnia, low sex drive, sleepiness during the day. I am taking it at night because my doctor said if it made me tired to take it at night. I assumed it would and started out taking it at night. Strange dreams, some pleasant. I was diagnosed with fibromyalgia. Seems to be helping with the pain. Have had anxiety and depression in my family, and have tried quite a few other medications that haven't worked. Only have been on it for two weeks but feel more positive in my mind, want to accomplish more in my life. Hopefully the side effects will dwindle away, worth it to stick with it from hearing others responses. Great medication.\"","rating":9.0,"date":"May 29, 2011","usefulCount":10,"review_length":125}
+```
+
+Мы можем использовать приёмы из раздела 2 для загрузки JSON-файлов: 
+
+```py
+data_files = {
+    "train": "drug-reviews-train.jsonl",
+    "validation": "drug-reviews-validation.jsonl",
+    "test": "drug-reviews-test.jsonl",
+}
+drug_dataset_reloaded = load_dataset("json", data_files=data_files)
+```
+
+Вот и все, что нужно для нашего экскурса при работе с  Datasets! Мы очистили датасет для обучения модели, вот некоторые идеи, которые вы могли бы реализовать самостоятельно: 
+
+1. Примените знания из раздела 3 для обучения классификатора, который может предсказывать состояние пациента по отзыву на лекарство.
+2. Используйте pipeline `summarization` из раздела 1для генерации саммари отзывов. 
+
+Далее мы посмотрим, как  Datasets могут помочь вам в работе с громадными датасетами, которые _невозможно_ обработать на вашем ноутбуке!
+

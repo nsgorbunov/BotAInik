@@ -1,0 +1,170 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Helvetica Neue", sans-serif;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* Шапка */
+.header {
+  display: flex;
+  align-items: center;
+  padding: 20px;
+  background-color: rgba(26, 26, 46, 0.8);
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.2);
+}
+
+.logo {
+  height: 50px;
+  margin-right: 20px;
+}
+
+.main-title {
+  font-size: 1.8rem;
+  font-weight: bold;
+}
+
+/* контейнер чата */
+.chat-container {
+  flex: 1;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+/* окно чата */
+.chat-window {
+  flex: 1;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 20px;
+  backdrop-filter: blur(8px);
+}
+
+/* общее для сообщений */
+.message {
+  display: flex;
+  margin: 10px 0;
+  width: 100%;
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* пользователь = справа */
+.message.user {
+  justify-content: flex-end;
+}
+
+/* бот = слева */
+.message.bot {
+  justify-content: flex-start;
+}
+
+/* внутренний блок содержимого сообщения */
+.message-content {
+  max-width: 60%;
+  background: rgba(255,255,255,0.1);
+  backdrop-filter: blur(8px);
+  border-radius: 10px;
+  padding: 10px 15px;
+  line-height: 1.5;
+  box-shadow: 0 0 8px rgba(0,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.1);
+  position: relative;
+}
+
+/* пользователь (справа) */
+.message.user .message-content {
+  background: linear-gradient(135deg, #264653, #2a9d8f);
+  border-color: rgba(255,255,255,0.2);
+}
+
+/* ботик (слева) */
+.message.bot .message-content {
+  background: linear-gradient(135deg, #4a148c, #ad1457);
+  border-color: rgba(255,255,255,0.2);
+}
+
+/* "анимация печати" тоже будет bot-сообщением */
+.message.bot.typing .message-content {
+  background: linear-gradient(135deg, #777, #444);
+}
+
+/* стрелочки (опционально) */
+.message.user .message-content::after,
+.message.bot .message-content::after {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  border: 8px solid transparent;
+}
+
+.message.user .message-content::after {
+  border-right-color: rgba(255,255,255,0.2);
+  right: -16px;
+  top: 10px;
+}
+.message.bot .message-content::after {
+  border-left-color: rgba(255,255,255,0.2);
+  left: -16px;
+  top: 10px;
+}
+
+/* анимация плавного появления */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* контейнер ввода */
+.input-container {
+  display: flex;
+  background-color: rgba(255,255,255,0.1);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 0 8px rgba(0,255,255,0.2);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+#user-input {
+  flex: 1;
+  min-height: 50px;
+  resize: none;
+  padding: 10px;
+  border: none;
+  outline: none;
+  font-size: 1rem;
+  background: transparent;
+  color: #fff;
+}
+
+#send-btn {
+  padding: 0 20px;
+  border: none;
+  font-size: 1rem;
+  color: #fff;
+  cursor: pointer;
+  background: #0d7377;
+  transition: background 0.2s ease-in-out;
+}
+
+#send-btn:hover {
+  background: #14ffec;
+  color: #1a1a2e;
+}

@@ -1,0 +1,564 @@
+
+
+
+
+Как и в предыдущих разделах, вы можете найти актуальную модель, которую мы обучим и загрузим на Hub, используя приведенный ниже код, и перепроверить ее предсказания здесь.
+
+## Подготовка данных[[preparing-the-data]]
+
+Чтобы дообучить или обучить модель перевода с нуля, нам понадобится датасет, подходящий для этой задачи. Как уже упоминалось, мы будем использовать датасет KDE4 , но вы можете легко адаптировать код для использования своих собственных данных, если у вас есть пары предложений на двух языках, с которых вы хотите переводить и на которые хотите переводить. Обратитесь к Главе 5 если вам нужно вспомнить, как загружать пользовательские данные в `Dataset`.
+
+### Датасет KDE4[[the-kde4-dataset]]
+
+Как обычно, мы загружаем наш датасет с помощью функции `load_dataset()`:
+
+```py
+from datasets import load_dataset
+
+raw_datasets = load_dataset("kde4", lang1="en", lang2="fr")
+```
+
+Если вы хотите работать с другой парой языков, вы можете указать их по кодам. Всего для этого датасета доступно 92 языка; вы можете увидеть их все, развернув языковые теги в его карточке датасета.
+
+
+
+### Предварительная обработка данных[[processing-the-data]]
+
+
+
+Подготовка наших данных довольно проста. Нужно помнить только об одном: необходимо убедиться, что токенизатор обрабатывает целевые значения на выходном языке (здесь - французском). Вы можете сделать это, передав целевые данные в аргумент `text_targets` метода `__call__` токенизатора.
+
+Чтобы увидеть, как это работает, давайте обработаем по одному примеру каждого языка из обучающего набора:
+
+```python
+en_sentence = split_datasets["train"][1]["translation"]["en"]
+fr_sentence = split_datasets["train"][1]["translation"]["fr"]
+
+inputs = tokenizer(en_sentence, text_target=fr_sentence)
+inputs
+```
+
+```python out
+{'input_ids': [47591, 12, 9842, 19634, 9, 0], 'attention_mask': [1, 1, 1, 1, 1, 1], 'labels': [577, 5891, 2, 3184, 16, 2542, 5, 1710, 0]}
+```
+
+Как мы видим, в выходных данных содержатся входные идентификаторы, связанные с английским предложением, а идентификаторы, связанные с французским, хранятся в поле `labels`. Если вы забудете указать, что выполняете токенизацию меток, они будут токенизированы входным токенизатором, что в случае с моделью Marian не приведет ни к чему хорошему:
+
+```python
+wrong_targets = tokenizer(fr_sentence)
+print(tokenizer.convert_ids_to_tokens(wrong_targets["input_ids"]))
+print(tokenizer.convert_ids_to_tokens(inputs["labels"]))
+```
+
+```python out
+['Par', 'dé', 'f', 'aut', ',', 'dé', 've', 'lop', 'per', 'les', 'fil', 's', 'de', 'discussion', '']
+['Par', 'défaut', ',', 'développer', 'les', 'fils', 'de', 'discussion', '']
+```
+
+Как мы видим, при использовании английского токенизатора для предварительной обработки французского предложения получается гораздо больше токенов, поскольку токенизатор не знает ни одного французского слова (кроме тех, которые также встречаются в английском языке, например "discussion").
+
+Поскольку `inputs` - это словарь с нашими обычными ключами (идентификаторы входных данных, маска внимания и т. д.), последним шагом будет определение функции предварительной обработки, которую мы будем применять к датасетам:
+
+```python
+max_length = 128
+
+
+def preprocess_function(examples):
+    inputs = [ex["en"] for ex in examples["translation"]]
+    targets = [ex["fr"] for ex in examples["translation"]]
+    model_inputs = tokenizer(
+        inputs, text_target=targets, max_length=max_length, truncation=True
+    )
+    return model_inputs
+```
+
+Обратите внимание, что мы установили одинаковую максимальную длину для наших входов и выходов. Поскольку тексты, с которыми мы имеем дело, довольно короткие, мы используем 128.
+
+
+
+
+
+Теперь мы можем применить эту функцию предварительной обработки ко всем частям нашего датасета за один раз:
+
+```py
+tokenized_datasets = split_datasets.map(
+    preprocess_function,
+    batched=True,
+    remove_columns=split_datasets["train"].column_names,
+)
+```
+
+Теперь, когда данные прошли предварительную обработку, мы готовы дообучить нашу предварительно обученную модель!
+
+{#if fw === 'pt'}
+
+## Дообучение модели с помощью API `Trainer`[[fine-tuning-the-model-with-the-trainer-api]]
+
+Фактический код, использующий `Trainer`, будет таким же, как и раньше, с одним лишь небольшим изменением: мы используем `Seq2SeqTrainer`, который является подклассом `Trainer`, что позволит нам правильно работать с оценкой, используя метод `generate()` для предсказания выходов на основе входов. Мы рассмотрим это более подробно, когда будем говорить о вычислении метрик.
+
+Прежде всего, нам нужна реальная модель, которую нужно дообучить. Мы воспользуемся обычным API `AutoModel`:
+
+```py
+from transformers import AutoModelForSeq2SeqLM
+
+model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+```
+
+{:else}
+
+## Дообучение модели с Keras[[fine-tuning-the-model-with-keras]]
+
+Прежде всего, нам нужна актуальная модель, которую нужно дообучить. Мы воспользуемся обычным API `AutoModel`:
+
+```py
+from transformers import TFAutoModelForSeq2SeqLM
+
+model = TFAutoModelForSeq2SeqLM.from_pretrained(model_checkpoint, from_pt=True)
+```
+
+
+
+{/if}
+
+Обратите внимание, что в этот раз мы используем модель, которая была обучена на задаче перевода и фактически уже может быть использована, поэтому нет предупреждения о пропущенных или новых инициализированных весах.
+
+### Сопоставление данных[[data-collation]]
+
+Для динамического батча нам понадобится коллатор данных для работы с дополнением (padding). Мы не можем просто использовать `DataCollatorWithPadding`, как в Главе 3, потому что в этом случае будут заполнены только входы (идентификаторы входов, маска внимания и идентификаторы типов токенов). Наши метки также должны быть дополнены до максимальной длины, встречающейся в метках. И, как уже говорилось, добовляемое значение, используемое для дополнения меток, должно быть `-100`, а не добавочный токен токенизатора, чтобы эти добавочные значения игнорировались при вычислении потерь.
+
+Все это делает `DataCollatorForSeq2Seq`. Как и `DataCollatorWithPadding`, он принимает `tokenizer`, используемый для препроцессирования входных данных, а также `model`. Это связано с тем, что данный коллатор данных также будет отвечать за подготовку входных идентификаторов декодера, которые представляют собой сдвинутые версии меток со специальным токеном в начале. Поскольку для разных архитектур этот сдвиг выполняется по-разному, `DataCollatorForSeq2Seq` должен знать объект `model`:
+
+{#if fw === 'pt'}
+
+```py
+from transformers import DataCollatorForSeq2Seq
+
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+```
+
+{:else}
+
+```py
+from transformers import DataCollatorForSeq2Seq
+
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, return_tensors="tf")
+```
+
+{/if}
+
+Чтобы протестировать его на нескольких примерах, мы просто вызываем его на списке примеров из нашего токинезированного обучающего набора:
+
+```py
+batch = data_collator([tokenized_datasets["train"][i] for i in range(1, 3)])
+batch.keys()
+```
+
+```python out
+dict_keys(['attention_mask', 'input_ids', 'labels', 'decoder_input_ids'])
+```
+
+Мы можем проверить, что наши метки были дополнены до максимальной длины батча, с использованием `-100`:
+
+```py
+batch["labels"]
+```
+
+```python out
+tensor([[  577,  5891,     2,  3184,    16,  2542,     5,  1710,     0,  -100,
+          -100,  -100,  -100,  -100,  -100,  -100],
+        [ 1211,     3,    49,  9409,  1211,     3, 29140,   817,  3124,   817,
+           550,  7032,  5821,  7907, 12649,     0]])
+```
+
+Также мы можем взглянуть на идентификаторы входов декодера и убедиться, что они являются сдвинутыми версиями меток:
+
+```py
+batch["decoder_input_ids"]
+```
+
+```python out
+tensor([[59513,   577,  5891,     2,  3184,    16,  2542,     5,  1710,     0,
+         59513, 59513, 59513, 59513, 59513, 59513],
+        [59513,  1211,     3,    49,  9409,  1211,     3, 29140,   817,  3124,
+           817,   550,  7032,  5821,  7907, 12649]])
+```
+
+Вот метки для первого и второго элементов в нашем датасете:
+
+```py
+for i in range(1, 3):
+    print(tokenized_datasets["train"][i]["labels"])
+```
+
+```python out
+[577, 5891, 2, 3184, 16, 2542, 5, 1710, 0]
+[1211, 3, 49, 9409, 1211, 3, 29140, 817, 3124, 817, 550, 7032, 5821, 7907, 12649, 0]
+```
+
+{#if fw === 'pt'}
+
+Мы передадим этот `data_collator` в `Seq2SeqTrainer`. Далее давайте рассмотрим метрику.
+
+{:else}
+
+Теперь мы можем использовать этот `data_collator` для преобразования каждого из наших датасетов в `tf.data.Dataset`, готовый к обучению:
+
+```python
+tf_train_dataset = model.prepare_tf_dataset(
+    tokenized_datasets["train"],
+    collate_fn=data_collator,
+    shuffle=True,
+    batch_size=32,
+)
+tf_eval_dataset = model.prepare_tf_dataset(
+    tokenized_datasets["validation"],
+    collate_fn=data_collator,
+    shuffle=False,
+    batch_size=16,
+)
+```
+
+{/if}
+
+
+### Метрики[[metrics]]
+
+
+
+Наконец, давайте посмотрим, как выглядят наши метрики после завершения обучения:
+
+```py
+print(compute_metrics())
+```
+
+```
+{'bleu': 57.334066271545865}
+```
+
+На этом этапе вы можете использовать виджет инференса на Model Hub, чтобы протестировать свою модель и поделиться ею с друзьями. Вы успешно дообучили модель для задачи перевода - поздравляем!
+
+{:else}
+
+Когда это сделано, мы можем определить наши `Seq2SeqTrainingArguments`. Как и в случае с `Trainer`, мы используем подкласс `TrainingArguments`, который содержит еще несколько дополнительных полей:
+
+```python
+from transformers import Seq2SeqTrainingArguments
+
+args = Seq2SeqTrainingArguments(
+    f"marian-finetuned-kde4-en-to-fr",
+    evaluation_strategy="no",
+    save_strategy="epoch",
+    learning_rate=2e-5,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=64,
+    weight_decay=0.01,
+    save_total_limit=3,
+    num_train_epochs=3,
+    predict_with_generate=True,
+    fp16=True,
+    push_to_hub=True,
+)
+```
+
+Помимо обычных гиперпараметров (таких как скорость обучения, количество эпох, размер батча и некоторое затухание веса), здесь есть несколько отличий по сравнению с тем, что мы видели в предыдущих разделах:
+
+- Мы не задаем никаких регулярных оценок, так как оценка занимает много времени; мы просто оценим нашу модель один раз до обучения и после.
+- Мы установили `fp16=True`, что ускоряет обучение на современных GPU.
+- Мы устанавливаем `predict_with_generate=True`, как обсуждалось выше.
+- Мы используем `push_to_hub=True` для загрузки модели в Hub в конце каждой эпохи.
+
+Обратите внимание, что в аргументе `hub_model_id` можно указать полное имя розитория, в который вы хотите отправить модель (в частности, этот аргумент нужно использовать, чтобы отправить модель в организацию). Например, когда мы отправили модель в организацию `huggingface-course`, мы добавили `hub_model_id="huggingface-course/marian-finetuned-kde4-en-to-fr"` в `Seq2SeqTrainingArguments`. По умолчанию используемый розиторий будет находиться в вашем пространстве имен и называться в соответствии с заданным вами выходным каталогом, поэтому в нашем случае это будет `"sgugger/marian-finetuned-kde4-en-to-fr"` (это модель, на которую мы ссылались в начале этого раздела).
+
+
+
+
+Наконец, мы просто передаем все в `Seq2SeqTrainer`:
+
+```python
+from transformers import Seq2SeqTrainer
+
+trainer = Seq2SeqTrainer(
+    model,
+    args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    data_collator=data_collator,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
+```
+
+Перед обучением мы сначала посмотрим, какую оценку получила наша модель, чтобы проверить, не ухудшаем ли мы результаты, дообучив ее. Выполнение этой команды займет некоторое время, поэтому во время ее выполнения можно выпить кофе:
+
+```python
+trainer.evaluate(max_length=max_length)
+```
+
+```python out
+{'eval_loss': 1.6964408159255981,
+ 'eval_bleu': 39.26865061007616,
+ 'eval_runtime': 965.8884,
+ 'eval_samples_per_second': 21.76,
+ 'eval_steps_per_second': 0.341}
+```
+
+Оценка BLEU в 39 баллов не так уж плохо, что говорит о том, что наша модель уже хорошо справляется с переводом английских предложений на французский.
+
+Далее следует обучение, которое также займет некоторое время:
+
+```python
+trainer.train()
+```
+
+Обратите внимание, что во время обучения каждый раз, когда модель сохраняется (здесь - каждую эпоху), она загружается на Hub в фоновом режиме. Таким образом, при необходимости вы сможете возобновить обучение на другой машине.
+
+После завершения обучения мы снова оцениваем нашу модель - надеемся, мы увидим некоторое улучшение в показателе BLEU!
+
+```py
+trainer.evaluate(max_length=max_length)
+```
+
+```python out
+{'eval_loss': 0.8558505773544312,
+ 'eval_bleu': 52.94161337775576,
+ 'eval_runtime': 714.2576,
+ 'eval_samples_per_second': 29.426,
+ 'eval_steps_per_second': 0.461,
+ 'epoch': 3.0}
+```
+
+Это улучшение почти на 14 пунктов, что очень хорошо.
+
+Наконец, мы используем метод `push_to_hub()`, чтобы убедиться, что загружена последняя версия модели. Тренер также создает карту модели со всеми результатами оценки и загружает ее. Эта карта модели содержит метаданные, которые помогают хабу моделей выбрать виджет для демонстрации инференса. Обычно ничего не нужно указывать, так как он сам определяет нужный виджет по классу модели, но в данном случае один и тот же класс модели может быть использован для всех видов задач, связанных с последовательностями, поэтому мы указываем, что это модель перевода:
+
+```py
+trainer.push_to_hub(tags="translation", commit_message="Training complete")
+```
+
+Эта команда возвращает URL-адрес только что выполненного коммита, если вы хотите его просмотреть:
+
+```python out
+'https://huggingface.co/sgugger/marian-finetuned-kde4-en-to-fr/commit/3601d621e3baae2bc63d3311452535f8f58f6ef3'
+```
+
+На этом этапе вы можете использовать виджет инференса на Model Hub, чтобы протестировать свою модель и поделиться ею с друзьями. Вы успешно дообучили модель для задачи перевода - поздравляем!
+
+Если вы хотите более глубоко погрузиться в цикл обучения, мы покажем вам, как сделать то же самое с помощью  Accelerate.
+
+{/if}
+
+{#if fw === 'pt'}
+
+## Индивидуальный цикл обучения[[a-custom-training-loop]]
+
+Теперь давайте рассмотрим полный цикл обучения, чтобы вы могли легко настроить нужные вам части. Он будет выглядеть примерно так же, как мы делали это в Главе 2 и Главе 3.
+
+### Подготовка всего к обучению[[preparing-everything-for-training]]
+
+Вы уже видели все это несколько раз, поэтому мы пройдемся по коду довольно быстро. Сначала мы создадим `DataLoader` из наших датасетов, после чего установим для датасетов формат `"torch"`, чтобы получить тензоры PyTorch:
+
+```py
+from torch.utils.data import DataLoader
+
+tokenized_datasets.set_format("torch")
+train_dataloader = DataLoader(
+    tokenized_datasets["train"],
+    shuffle=True,
+    collate_fn=data_collator,
+    batch_size=8,
+)
+eval_dataloader = DataLoader(
+    tokenized_datasets["validation"], collate_fn=data_collator, batch_size=8
+)
+```
+
+Затем мы повторно инстанцируем нашу модель, чтобы убедиться, что мы не продолжаем дообучение предыдущей модели, а начинаем с предварительно обученной модели:
+
+```py
+model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+```
+
+Тогда нам понадобится оптимизатор:
+
+```py
+from transformers import AdamW
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+```
+
+Когда у нас есть все эти объекты, мы можем отправить их в метод `accelerator.prepare()`. Помните, что если вы хотите обучаться на TPU в блокноте Colab, вам нужно будет перенести весь этот код в функцию обучения, которая не должна выполнять ни одной ячейки, инстанцирующей `Accelerator`.
+
+```py
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, eval_dataloader
+)
+```
+
+Теперь, когда мы отправили наш `train_dataloader` в `accelerator.prepare()`, мы можем использовать его длину для вычисления количества шагов обучения. Помните, что это всегда нужно делать после подготовки загрузчика данных, так как этот метод изменит длину `DataLoader`. Мы используем классический линейный планировшик скорости обучения до 0:
+
+```py
+from transformers import get_scheduler
+
+num_train_epochs = 3
+num_update_steps_per_epoch = len(train_dataloader)
+num_training_steps = num_train_epochs * num_update_steps_per_epoch
+
+lr_scheduler = get_scheduler(
+    "linear",
+    optimizer=optimizer,
+    num_warmup_steps=0,
+    num_training_steps=num_training_steps,
+)
+```
+
+Наконец, чтобы отправить нашу модель в Hub, нам нужно создать объект `Repository` в рабочей папке. Сначала войдите в Hub Hugging Face, если вы еще не авторизованы. Мы определим имя розитория по идентификатору модели, который мы хотим присвоить нашей модели (не стесняйтесь заменить `repo_name` на свой собственный выбор; оно просто должно содержать ваше имя пользователя, что и делает функция `get_full_repo_name()`):
+
+```py
+from huggingface_hub import Repository, get_full_repo_name
+
+model_name = "marian-finetuned-kde4-en-to-fr-accelerate"
+repo_name = get_full_repo_name(model_name)
+repo_name
+```
+
+```python out
+'sgugger/marian-finetuned-kde4-en-to-fr-accelerate'
+```
+
+Затем мы можем клонировать этот розиторий в локальную папку. Если она уже существует, эта локальная папка должна быть клоном того розитория, с которым мы работаем:
+
+```py
+output_dir = "marian-finetuned-kde4-en-to-fr-accelerate"
+repo = Repository(output_dir, clone_from=repo_name)
+```
+
+Теперь мы можем загрузить все, что сохранили в `output_dir`, вызвав метод `repo.push_to_hub()`. Это поможет нам загружать промежуточные модели в конце каждой эпохи.
+
+### Цикл обучения[[training-loop]]
+
+Теперь мы готовы написать полный цикл обучения. Чтобы упростить его оценочную часть, мы определяем эту функцию `postprocess()`, которая принимает прогнозы и метки и преобразует их в списки строк, которые будет ожидать наш объект `metric`:
+
+```py
+def postprocess(predictions, labels):
+    predictions = predictions.cpu().numpy()
+    labels = labels.cpu().numpy()
+
+    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+
+    # Заменим -100 в метках, так как мы не можем их декодировать.
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+    # Немного простой постобработки
+    decoded_preds = [pred.strip() for pred in decoded_preds]
+    decoded_labels = [[label.strip()] for label in decoded_labels]
+    return decoded_preds, decoded_labels
+```
+
+Цикл обучения очень похож на циклы в разделе 2 и главе 3, с некоторыми отличиями в части оценки - так что давайте сосредоточимся на этом!
+
+Первое, что следует отметить, это то, что мы используем метод `generate()` для вычисления прогнозов, но это метод нашей базовой модели, а не обернутой модели  Accelerate, созданной в методе `prepare()`. Поэтому мы сначала развернем модель, а затем вызовем этот метод.
+
+Второй момент заключается в том, что, как и в случае с классификацией токенов, два процесса могут дополнить входы и метки до разных форм, поэтому мы используем `accelerator.pad_across_processes()`, чтобы сделать прогнозы и метки одинаковыми по форме перед вызовом метода `gather()`. Если мы этого не сделаем, оценка либо выдаст ошибку, либо зависнет навсегда.
+
+```py
+from tqdm.auto import tqdm
+import torch
+
+progress_bar = tqdm(range(num_training_steps))
+
+for epoch in range(num_train_epochs):
+    # Обучение
+    model.train()
+    for batch in train_dataloader:
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+        progress_bar.update(1)
+
+    # Оценка
+    model.eval()
+    for batch in tqdm(eval_dataloader):
+        with torch.no_grad():
+            generated_tokens = accelerator.unwrap_model(model).generate(
+                batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                max_length=128,
+            )
+        labels = batch["labels"]
+
+        ## Необходимо дополнить прогнозы и метки
+        generated_tokens = accelerator.pad_across_processes(
+            generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+        )
+        labels = accelerator.pad_across_processes(labels, dim=1, pad_index=-100)
+
+        predictions_gathered = accelerator.gather(generated_tokens)
+        labels_gathered = accelerator.gather(labels)
+
+        decoded_preds, decoded_labels = postprocess(predictions_gathered, labels_gathered)
+        metric.add_batch(predictions=decoded_preds, references=decoded_labels)
+
+    results = metric.compute()
+    print(f"epoch {epoch}, BLEU score: {results['score']:.2f}")
+
+    # Сохранение и загрузка
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(output_dir)
+        repo.push_to_hub(
+            commit_message=f"Training in progress epoch {epoch}", blocking=False
+        )
+```
+
+```python out
+epoch 0, BLEU score: 53.47
+epoch 1, BLEU score: 54.24
+epoch 2, BLEU score: 54.44
+```
+
+После этого у вас должна получиться модель, результаты которой будут очень похожи на модель, обученную с помощью `Seq2SeqTrainer`. Вы можете проверить модель, которую мы обучили с помощью этого кода, на *huggingface-course/marian-finetuned-kde4-en-to-fr-accelerate*. А если вы хотите протестировать какие-либо изменения в цикле обучения, вы можете реализовать их напрямую, отредактировав код, показанный выше!
+
+{/if}
+
+## Использование дообученной модели[[using-the-fine-tuned-model]]
+
+Мы уже показали вам, как можно использовать модель, которую мы дообучили на Model Hub, с помощью виджета инференса. Чтобы использовать ее локально в `pipeline`, нам просто нужно указать соответствующий идентификатор модели:
+
+```py
+from transformers import pipeline
+
+# Замените это на свою собственную контрольную точку
+model_checkpoint = "huggingface-course/marian-finetuned-kde4-en-to-fr"
+translator = pipeline("translation", model=model_checkpoint)
+translator("Default to expanded threads")
+```
+
+```python out
+[{'translation_text': 'Par défaut, développer les fils de discussion'}]
+```
+
+Как и ожидалось, наша предварительно обученная модель адаптировала свои знания к корпусу, на котором мы ее дообучили, и вместо того, чтобы оставить английское слово "threads" в покое, она теперь переводит его на официальный французский вариант. То же самое относится и к слову " plugin ":
+
+```py
+translator(
+    "Unable to import %1 using the OFX importer plugin. This file is not the correct format."
+)
+```
+
+```python out
+[{'translation_text': "Impossible d'importer %1 en utilisant le module externe d'importation OFX. Ce fichier n'est pas le bon format."}]
+```
+
+Еще один отличный пример доменной адаптации!
+
+

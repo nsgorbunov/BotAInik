@@ -1,0 +1,979 @@
+
+
+Как мы увидим, эти резюме кратки, поскольку они составляются на основе названий, которые покупатели указывают в своих отзывах о товаре. Для начала давайте соберем подходящий двуязыковой корпус для этой задачи.
+
+## Подготовка многоязыкового корпуса[[preparing-a-multilingual-corpus]]
+
+Для создания нашей двуязыковой суммаризации мы будем использовать Multilingual Amazon Reviews Corpus. Этот корпус состоит из отзывов о товарах Amazon на шести языках и обычно используется для тестирования многоязыковых классификаторов. Однако, поскольку каждый отзыв сопровождается коротким заголовком, мы можем использовать заголовки в качестве целевых резюме для обучения нашей модели! Чтобы начать работу, давайте загрузим английские и испанские подмножества из Hugging Face Hub:
+
+```python
+from datasets import load_dataset
+
+spanish_dataset = load_dataset("amazon_reviews_multi", "es")
+english_dataset = load_dataset("amazon_reviews_multi", "en")
+english_dataset
+```
+
+```python out
+DatasetDict({
+    train: Dataset({
+        features: ['review_id', 'product_id', 'reviewer_id', 'stars', 'review_body', 'review_title', 'language', 'product_category'],
+        num_rows: 200000
+    })
+    validation: Dataset({
+        features: ['review_id', 'product_id', 'reviewer_id', 'stars', 'review_body', 'review_title', 'language', 'product_category'],
+        num_rows: 5000
+    })
+    test: Dataset({
+        features: ['review_id', 'product_id', 'reviewer_id', 'stars', 'review_body', 'review_title', 'language', 'product_category'],
+        num_rows: 5000
+    })
+})
+```
+
+Как видите, для каждого языка есть 200 000 отзывов в части `train` и по 5 000 отзывов в частях `validation` и `test`. Интересующая нас информация о рецензиях содержится в столбцах `review_body` и `review_title`. Давайте рассмотрим несколько примеров, создав простую функцию, которая берет случайную выборку из обучающего множества с помощью методов, изученных в Главе 5:
+
+```python
+def show_samples(dataset, num_samples=3, seed=42):
+    sample = dataset["train"].shuffle(seed=seed).select(range(num_samples))
+    for example in sample:
+        print(f"\n'>> Title: {example['review_title']}'")
+        print(f"'>> Review: {example['review_body']}'")
+
+
+show_samples(english_dataset)
+```
+
+```python out
+'>> Title: Worked in front position, not rear'
+'>> Review: 3 stars because these are not rear brakes as stated in the item description. At least the mount adapter only worked on the front fork of the bike that I got it for.'
+
+'>> Title: meh'
+'>> Review: Does it’s job and it’s gorgeous but mine is falling apart, I had to basically put it together again with hot glue'
+
+'>> Title: Can\'t beat these for the money'
+'>> Review: Bought this for handling miscellaneous aircraft parts and hanger "stuff" that I needed to organize; it really fit the bill. The unit arrived quickly, was well packaged and arrived intact (always a good sign). There are five wall mounts-- three on the top and two on the bottom. I wanted to mount it on the wall, so all I had to do was to remove the top two layers of plastic drawers, as well as the bottom corner drawers, place it when I wanted and mark it; I then used some of the new plastic screw in wall anchors (the 50 pound variety) and it easily mounted to the wall. Some have remarked that they wanted dividers for the drawers, and that they made those. Good idea. My application was that I needed something that I can see the contents at about eye level, so I wanted the fuller-sized drawers. I also like that these are the new plastic that doesn\'t get brittle and split like my older plastic drawers did. I like the all-plastic construction. It\'s heavy duty enough to hold metal parts, but being made of plastic it\'s not as heavy as a metal frame, so you can easily mount it to the wall and still load it up with heavy stuff, or light stuff. No problem there. For the money, you can\'t beat it. Best one of these I\'ve bought to date-- and I\'ve been using some version of these for over forty years.'
+```
+
+
+
+Эта выборка демонстрирует разнообразие отзывов, которые обычно можно найти в сети, - от положительных до отрицательных (и все, что между ними!). Хотя пример с названием "meh" не очень информативен, остальные названия выглядят как достойные резюме самих отзывов. Обучение модели суммаризации всех 400 000 отзывов заняло бы слишком много времени на одном GPU, поэтому вместо этого мы сосредоточимся на создании резюме для одного домена продуктов. Чтобы получить представление о том, какие домены мы можем выбрать, давайте преобразуем `english_dataset` в `pandas.DataFrame` и вычислим количество отзывов по каждой категории товаров:
+
+```python
+english_dataset.set_format("pandas")
+english_df = english_dataset["train"][:]
+# Show counts for top 20 products
+english_df["product_category"].value_counts()[:20]
+```
+
+```python out
+home                      17679
+apparel                   15951
+wireless                  15717
+other                     13418
+beauty                    12091
+drugstore                 11730
+kitchen                   10382
+toy                        8745
+sports                     8277
+automotive                 7506
+lawn_and_garden            7327
+home_improvement           7136
+pet_products               7082
+digital_ebook_purchase     6749
+pc                         6401
+electronics                6186
+office_product             5521
+shoes                      5197
+grocery                    4730
+book                       3756
+Name: product_category, dtype: int64
+```
+
+Самые популярные товары в английском датасете - это бытовые товары, одежда и беспроводная электроника. Однако, чтобы поддержать тему Amazon, давайте сосредоточимся на суммаризации отзывов о книгах - в конце концов, именно для этого компания и была основана! Мы видим две категории товаров, которые подходят для этой цели (`book` и `digital_ebook_purchase`), поэтому давайте отфильтруем датасеты на обоих языках только для этих товаров. Как мы видели в Главе 5, функция `Dataset.filter()` позволяет нам очень эффективно разделять датасет на части, поэтому мы можем определить простую функцию для этого:
+
+```python
+def filter_books(example):
+    return (
+        example["product_category"] == "book"
+        or example["product_category"] == "digital_ebook_purchase"
+    )
+```
+
+Теперь, когда мы применим эту функцию к `english_dataset` и `spanish_dataset`, результат будет содержать только те строки, в которых присутствуют категории книг. Прежде чем применить фильтр, давайте изменим формат `english_dataset` с `"pandas"` обратно на `"arrow"`:
+
+```python
+english_dataset.reset_format()
+```
+
+Затем мы можем применить функцию фильтрации, и в качестве проверки работоспособности давайте посмотрим на выборку отзывов, чтобы убедиться, что они действительно посвящены книгам:
+
+```python
+spanish_books = spanish_dataset.filter(filter_books)
+english_books = english_dataset.filter(filter_books)
+show_samples(english_books)
+```
+
+```python out
+'>> Title: I\'m dissapointed.'
+'>> Review: I guess I had higher expectations for this book from the reviews. I really thought I\'d at least like it. The plot idea was great. I loved Ash but, it just didnt go anywhere. Most of the book was about their radio show and talking to callers. I wanted the author to dig deeper so we could really get to know the characters. All we know about Grace is that she is attractive looking, Latino and is kind of a brat. I\'m dissapointed.'
+
+'>> Title: Good art, good price, poor design'
+'>> Review: I had gotten the DC Vintage calendar the past two years, but it was on backorder forever this year and I saw they had shrunk the dimensions for no good reason. This one has good art choices but the design has the fold going through the picture, so it\'s less aesthetically pleasing, especially if you want to keep a picture to hang. For the price, a good calendar'
+
+'>> Title: Helpful'
+'>> Review: Nearly all the tips useful and. I consider myself an intermediate to advanced user of OneNote. I would highly recommend.'
+```
+
+Хорошо, мы видим, что отзывы не совсем о книгах и могут относиться к таким вещам, как календари и электронные приложения, например OneNote. Тем не менее, домен кажется подходящим для обучения модели суммаризации. Прежде чем мы рассмотрим различные модели, подходящие для этой задачи, нам осталось подготовить данные: объединить английские и испанские отзывы в один объект `DatasetDict`. Datasets предоставляет удобную функцию `concatenate_datasets()`, которая (как следует из названия) стекирует два объекта `Dataset` друг на друга. Таким образом, чтобы создать двуязыковой датасет, мы пройдемся по каждой части, объединим датасеты для этой части и перемешаем результат, чтобы наша модель не была слишком переобучена для одного языка:
+
+```python
+from datasets import concatenate_datasets, DatasetDict
+
+books_dataset = DatasetDict()
+
+for split in english_books.keys():
+    books_dataset[split] = concatenate_datasets(
+        [english_books[split], spanish_books[split]]
+    )
+    books_dataset[split] = books_dataset[split].shuffle(seed=42)
+
+# Посмотрим на несколько примеров
+show_samples(books_dataset)
+```
+
+```python out
+'>> Title: Easy to follow!!!!'
+'>> Review: I loved The dash diet weight loss Solution. Never hungry. I would recommend this diet. Also the menus are well rounded. Try it. Has lots of the information need thanks.'
+
+'>> Title: PARCIALMENTE DAÑADO'
+'>> Review: Me llegó el día que tocaba, junto a otros libros que pedí, pero la caja llegó en mal estado lo cual dañó las esquinas de los libros porque venían sin protección (forro).'
+
+'>> Title: no lo he podido descargar'
+'>> Review: igual que el anterior'
+```
+
+Это определенно похоже на смесь английских и испанских обзоров! Теперь, когда у нас есть тренировочный корпус, осталось проверить распределение слов в рецензиях и их заголовках. Это особенно важно для задач суммаризации, где короткие эталонные резюме в данных могут склонять модель в сторону вывода только одного или двух слов в сгенерированных резюме. На графиках ниже показаны распределения слов, и мы видим, что названия сильно перекошены в сторону 1-2 слов:
+
+
+
+Чтобы справиться с этой проблемой, мы отфильтруем примеры с очень короткими заголовками, чтобы наша модель могла создавать более интересные резюме. Поскольку мы имеем дело с английскими и испанскими текстами, мы можем использовать грубую эвристику для разделения названий по символам пробела, а затем использовать наш надежный метод `Dataset.filter()` следующим образом:
+
+```python
+books_dataset = books_dataset.filter(lambda x: len(x["review_title"].split()) > 2)
+```
+
+Теперь, когда мы подготовили корпус, давайте рассмотрим несколько возможных моделей Transformer, которые можно было бы дообучить на его основе!
+
+## Модели для суммаризации текста[[models-for-text-summarization]]
+
+Если задуматься, то суммаризация текста - это задача, похожая на машинный перевод: у нас есть текст, например рецензия, который мы хотели бы "перевести" в более короткую версию, передающую основные особенности исходного текста. Соответственно, большинство моделей Transformer для суммаризации используют архитектуру кодер-декодер, с которой мы впервые столкнулись в Глава 1, хотя есть и исключения, например семейство моделей GPT, которые также могут использоваться для суммаризации в условиях few-shot настроек. В следующей таблице перечислены некоторые популярные предварительно обученные модели, которые можно дообучить для суммаризации.
+
+| Модель Transformer | Описание                                                                                                                                                                                                    | Многоязычная? |
+| :---------: | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-----------: |
+|    GPT-2    | Хотя GPT-2 обучен как авторегрессивная языковая модель, вы можете заставить его генерировать резюме, добавляя "TL;DR" в конце входного текста.                                                                          |             |
+|   PEGASUS   | Использует цель предварительного обучения для предсказания замаскированных предложений в текстах с несколькими предложениями. Эта задача предварительного обучения ближе к суммаризации, чем к классическому языковому моделированию демонстрирует высокие результаты в популярных бенчмарках.|             |
+|     T5      | Универсальная трансформерная архитектура, которая формулирует все задачи в рамках преобразования текста в текст; например, входной формат модели для суммаризации документа - `summarize: ARTICLE`.                              |             |
+|     mT5     | Многоязыковая версия T5, предварительно обученная на многоязыковом корпусе Common Crawl (mC4), охватывающем 101 язык.                                                                                                |             |
+|    BART     | Новая архитектура Transformer с кодером и стеком декодеров, обученных восстанавливать поврежденный входной сигнал, сочетает в себе схемы предварительного обучения BERT и GPT-2.                                    |             |
+|  mBART-50   | Многоязыковая версия BART, предварительно обученная на 50 языках.                                                                                                                                                     |             |
+
+Как видно из этой таблицы, большинство моделей Transformer для суммаризации (и вообще для большинства задач NLP) являются монолингвистическими. Это хорошо, если ваша задача на "высокоресурсном" языке, таком как английский или немецкий, но не очень хорошо для тысяч других языков, используемых по всему миру. К счастью, существует класс многоязыковых моделей Transformer, таких как mT5 и mBART, которые приходят на помощь. Эти модели предварительно обучаются с помощью языкового моделирования, но с изюминкой: вместо обучения на корпусе одного языка они обучаются совместно на текстах более чем на 50 языках одновременно!
+
+Мы сосредоточимся на mT5, интересной архитектуре, основанной на T5, которая была предварительно обучена на фреймворке "текс-в-текст" (text-to-text). В T5 каждая задача NLP формулируется в терминах префикса подсказки, например `summarize:`, который определяет, что модель должна адаптировать сгенерированный текст к подсказке. Как показано на рисунке ниже, это делает T5 чрезвычайно универсальным, поскольку вы можете решать множество задач с помощью одной модели!
+
+
+
+В mT5 не используются префиксы, но она обладает многими универсальными возможностями T5 и имеет многоязыковое преимущество. Теперь, когда мы выбрали модель, давайте посмотрим, как подготовить данные для обучения.
+
+
+
+
+## Предварительная обработка данных[[preprocessing-the-data]]
+
+
+
+Давайте протестируем токенизатор mT5 на небольшом примере:
+
+```python
+inputs = tokenizer("I loved reading the Hunger Games!")
+inputs
+```
+
+```python out
+{'input_ids': [336, 259, 28387, 11807, 287, 62893, 295, 12507, 1], 'attention_mask': [1, 1, 1, 1, 1, 1, 1, 1, 1]}
+```
+
+Здесь мы видим знакомые нам `input_ids` и `attention_mask`, с которыми мы столкнулись в наших первых экспериментах по дообучению еще в Главе 3. Давайте декодируем эти входные идентификаторы с помощью функции токенизатора `convert_ids_to_tokens()`, чтобы понять, с каким токенизатором мы имеем дело:
+
+```python
+tokenizer.convert_ids_to_tokens(inputs.input_ids)
+```
+
+```python out
+['I', '', 'loved', 'reading', 'the', 'Hung', 'er', 'Games', '']
+```
+
+Специальный символ Юникода `` и токен конца последовательности `` указывают на то, что мы имеем дело с токенизатором SentencePiece, который основан на алгоритме сегментации Unigram, рассмотренном в Главе 6. Unigram особенно полезен для многоязычных корпусов, поскольку он позволяет SentencePiece не зависеть от ударений, пунктуации и того факта, что во многих языках, например в японском, нет пробельных символов.
+
+Для токенизации нашего корпуса нам придется столкнуться с одной тонкостью, связанной с сумризацией: поскольку наши метки также являются текстом, возможно, что они превышают максимальный размер контекста модели. Это означает, что нам нужно применять усечение как к обзорам, так и к их заголовкам, чтобы не передавать в модель слишком длинные данные. Токенизаторы в  Transformers предоставляют интересный аргумент `text_target`, который позволяет вам токенизировать метки параллельно с входными данными. Вот пример того, как обрабатываются входные и целевые данные для mT5:
+
+```python
+max_input_length = 512
+max_target_length = 30
+
+
+def preprocess_function(examples):
+    model_inputs = tokenizer(
+        examples["review_body"],
+        max_length=max_input_length,
+        truncation=True,
+    )
+    labels = tokenizer(
+        examples["review_title"], max_length=max_target_length, truncation=True
+    )
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
+```
+
+Давайте пройдемся по этому коду, чтобы понять, что происходит. Первое, что мы сделали, это определили значения `max_input_length` и `max_target_length`, которые устанавливают верхние границы длины наших обзоров и заголовков. Поскольку тело обзора обычно намного больше заголовка, мы соответственно изменили эти значения.
+
+С помощью `preprocess_function()` можно провести токенизацию всего корпуса с помощью удобной функции `Dataset.map()`, которую мы часто использовали на протяжении всего курса:
+
+```python
+tokenized_datasets = books_dataset.map(preprocess_function, batched=True)
+```
+
+Теперь, когда корпус был предварительно обработан, давайте посмотрим на некоторые метрики, которые обычно используются для суммаризации. Как мы увидим, не существует серебряной пули, когда дело доходит до измерения качества сгенерированного машиной текста.
+
+
+
+
+## Метрики для суммаризации текста[[metrics-for-text-summarization]]
+
+
+
+Для ROUGE recall измеряет, насколько эталонное резюме соответствует сгенерированному. Если мы просто сравниваем слова, recall можно рассчитать по следующей формуле:
+
+$$ \mathrm{Recall} = \frac{\mathrm{Number\,of\,overlapping\, words}}{\mathrm{Total\, number\, of\, words\, in\, reference\, summary}} $$
+
+Для нашего простого примера выше эта формула дает идеальный recall 6/6 = 1; то есть все слова в эталонном резюме были получены моделью. Это может показаться замечательным, но представьте, если бы сгенерированное нами резюме было "I really really loved reading the Hunger Games all night". Это тоже дало бы идеальный recall, но, возможно, было бы хуже, поскольку было бы многословным. Чтобы справиться с этими сценариями, мы также вычисляем precision, которая в контексте ROUGE измеряет, насколько сгенерированное резюме было релевантным:
+
+$$ \mathrm{Precision} = \frac{\mathrm{Number\,of\,overlapping\, words}}{\mathrm{Total\, number\, of\, words\, in\, generated\, summary}} $$
+
+Если применить это к нашему подробному резюме, то precision составит 6/10 = 0,6, что значительно хуже, чем precision 6/7 = 0,86, полученная при использовании более короткого резюме. На практике обычно вычисляют и precision, и recall, а затем F1-score (среднее гармоническое из precision и recall). Мы можем легко это сделать с помощью  Datasets, предварительно установив пакет `rouge_score`:
+
+```py
+!pip install rouge_score
+```
+
+а затем загрузить метрику ROUGE следующим образом:
+
+```python
+import evaluate
+
+rouge_score = evaluate.load("rouge")
+```
+
+Затем мы можем использовать функцию `rouge_score.compute()`, чтобы рассчитать все метрики сразу:
+
+```python
+scores = rouge_score.compute(
+    predictions=[generated_summary], references=[reference_summary]
+)
+scores
+```
+
+```python out
+{'rouge1': AggregateScore(low=Score(precision=0.86, recall=1.0, fmeasure=0.92), mid=Score(precision=0.86, recall=1.0, fmeasure=0.92), high=Score(precision=0.86, recall=1.0, fmeasure=0.92)),
+ 'rouge2': AggregateScore(low=Score(precision=0.67, recall=0.8, fmeasure=0.73), mid=Score(precision=0.67, recall=0.8, fmeasure=0.73), high=Score(precision=0.67, recall=0.8, fmeasure=0.73)),
+ 'rougeL': AggregateScore(low=Score(precision=0.86, recall=1.0, fmeasure=0.92), mid=Score(precision=0.86, recall=1.0, fmeasure=0.92), high=Score(precision=0.86, recall=1.0, fmeasure=0.92)),
+ 'rougeLsum': AggregateScore(low=Score(precision=0.86, recall=1.0, fmeasure=0.92), mid=Score(precision=0.86, recall=1.0, fmeasure=0.92), high=Score(precision=0.86, recall=1.0, fmeasure=0.92))}
+```
+
+Ого, в этом выводе много информации - что же она означает? Во-первых,  Datasets действительно вычисляет доверительные интервалы для precision, recall и F1-score; это `low`, `mid`, и `high` атрибуты, которые вы можете здесь увидеть. Кроме того,  Dataset вычисляет различные оценки ROUGE, которые основаны на различных типах детализации текста при сравнении сгенерированных и эталонных резюме. Вариант `rouge1` представляет собой перекрытие униграмм - это просто модный способ сказать о перекрытии слов, и это именно та метрика, которую мы обсуждали выше. Чтобы убедиться в этом, давайте извлечем `среднее` значение наших оценок:
+
+```python
+scores["rouge1"].mid
+```
+
+```python out
+Score(precision=0.86, recall=1.0, fmeasure=0.92)
+```
+
+Отлично, показатели precision и recall совпадают! А как насчет других показателей ROUGE? `rouge2` измеряет перекрытие биграмм (считайте, что это перекрытие пар слов), а `rougeL` и `rougeLsum` измеряют самые длинные совпадающие последовательности слов, ища самые длинные общие подстроки в сгенерированных и эталонных резюме. Слово "sum" в `rougeLsum` означает, что эта метрика вычисляется для всего резюме, в то время как `rougeL` вычисляется как среднее по отдельным предложениям.
+
+
+
+Мы будем использовать эту оценку ROUGE для отслеживания эффективности нашей модели, но перед этим давайте сделаем то, что должен сделать каждый хороший NLP-практик: создадим сильную, но простую базовую модель!
+
+### Создание сильного базового уровня[[creating-a-strong-baseline]]
+
+Для суммаризации текста обычно берут первые три предложения статьи, что часто называют базвым уровнем _lead-3_. Мы могли бы использовать символы полной остановки для отслеживания границ предложений, но это не поможет при использовании таких аббревиатур, как " U.S." или "U.N.". -- поэтому вместо этого мы воспользуемся библиотекой `nltk`, которая включает в себя лучший алгоритм для таких случаев. Вы можете установить пакет с помощью `pip` следующим образом:
+
+```python
+!pip install nltk
+```
+
+а затем скачайте правила пунктуации:
+
+```python
+import nltk
+
+nltk.download("punkt")
+```
+
+Далее мы импортируем токенизатор предложений из `nltk` и создадим простую функцию для извлечения первых трех предложений в обзоре. При суммаризации текста принято отделять каждое предложение новой строкой, поэтому давайте включим эту функцию и протестируем ее на обучающем примере:
+
+```python
+from nltk.tokenize import sent_tokenize
+
+
+def three_sentence_summary(text):
+    return "\n".join(sent_tokenize(text)[:3])
+
+
+print(three_sentence_summary(books_dataset["train"][1]["review_body"]))
+```
+
+```python out
+'I grew up reading Koontz, and years ago, I stopped,convinced i had "outgrown" him.'
+'Still,when a friend was looking for something suspenseful too read, I suggested Koontz.'
+'She found Strangers.'
+```
+
+Похоже, что это работает, так что теперь давайте реализуем функцию, которая извлекает эти "резюме" из датасета и вычисляет оценку ROUGE для базового уровня:
+
+```python
+def evaluate_baseline(dataset, metric):
+    summaries = [three_sentence_summary(text) for text in dataset["review_body"]]
+    return metric.compute(predictions=summaries, references=dataset["review_title"])
+```
+
+Затем мы можем использовать эту функцию для вычисления оценок ROUGE на валидационном множестве и немного приукрасить их с помощью Pandas:
+
+```python
+import pandas as pd
+
+score = evaluate_baseline(books_dataset["validation"], rouge_score)
+rouge_names = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+rouge_dict = dict((rn, round(score[rn].mid.fmeasure * 100, 2)) for rn in rouge_names)
+rouge_dict
+```
+
+```python out
+{'rouge1': 16.74, 'rouge2': 8.83, 'rougeL': 15.6, 'rougeLsum': 15.96}
+```
+
+Мы видим, что оценка `rouge2` значительно ниже, чем у остальных; скорее всего, это отражает тот факт, что заголовки рецензий обычно лаконичны, и поэтому базовый уровень lead-3 слишком многословен. Теперь, когда у нас есть хороший базовый уровень для работы, давайте дообучим mT5!
+
+{#if fw === 'pt'}
+
+## Дообучение mT5 с API `Trainer`[[fine-tuning-mt5-with-the-trainer-api]]
+
+Дообучение модели суммаризации очень похоже на другие задачи, которые мы рассмотрели в этой главе. Первое, что нам нужно сделать, это загрузить предварительно обученную модель из контрольной точки `mt5-small`. Поскольку суммаризация - это задача преобразования последовательности в последовательность, мы можем загрузить модель с помощью класса `AutoModelForSeq2SeqLM`, который автоматически загрузит и кэширует веса:
+
+```python
+from transformers import AutoModelForSeq2SeqLM
+
+model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+```
+
+{:else}
+
+## Дообучение mT5 с Keras[[fine-tuning-mt5-with-keras]]
+
+Дообучение модели суммаризации очень похоже на другие задачи, которые мы рассмотрели в этой главе. Первое, что нам нужно сделать, это загрузить предварительно обученную модель из контрольной точки `mt5-small`. Поскольку суммаризация - это задача преобразования последовательности в последовательность, мы можем загрузить модель с помощью класса `TFAutoModelForSeq2SeqLM`, который автоматически загрузит и кэширует веса:
+
+```python
+from transformers import TFAutoModelForSeq2SeqLM
+
+model = TFAutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+```
+
+{/if}
+
+
+
+Следующее, что нам нужно сделать, это войти в Hugging Face Hub. Если вы выполняете этот код в ноутбуке, вы можете сделать это с помощью следующей полезной функции:
+
+```python
+from huggingface_hub import notebook_login
+
+notebook_login()
+```
+
+которая отобразит виджет, где вы можете ввести свои учетные данные. Также вы можете запустить эту команду в терминале и войти в систему там:
+
+```
+huggingface-cli login
+```
+
+{#if fw === 'pt'}
+
+Для вычисления оценки ROUGE в процессе обучения нам понадобится генерировать резюме. К счастью,  Transformers предоставляет специальные классы `Seq2SeqTrainingArguments` и `Seq2SeqTrainer`, которые могут сделать это за нас автоматически! Чтобы увидеть, как это работает, давайте сначала определим гиперпараметры и другие аргументы для наших экспериментов:
+
+```python
+from transformers import Seq2SeqTrainingArguments
+
+batch_size = 8
+num_train_epochs = 8
+# Выводим потери при обучении по каждой эпохе
+logging_steps = len(tokenized_datasets["train"]) // batch_size
+model_name = model_checkpoint.split("/")[-1]
+
+args = Seq2SeqTrainingArguments(
+    output_dir=f"{model_name}-finetuned-amazon-en-es",
+    evaluation_strategy="epoch",
+    learning_rate=5.6e-5,
+    per_device_train_batch_size=batch_size,
+    per_device_eval_batch_size=batch_size,
+    weight_decay=0.01,
+    save_total_limit=3,
+    num_train_epochs=num_train_epochs,
+    predict_with_generate=True,
+    logging_steps=logging_steps,
+    push_to_hub=True,
+)
+```
+
+Здесь аргумент `predict_with_generate` был задан, чтобы указать, что мы должны генерировать резюме во время оценки, чтобы мы могли вычислить баллы ROUGE для каждой эпохи. Как обсуждалось в Главе 1, декодер выполняет инференс, предсказывая токены по одному, и это реализуется методом модели `generate()`. Задание `predict_with_generate=True` указывает `Seq2SeqTrainer` на использование этого метода для оценки. Мы также скорректировали некоторые гиперпараметры по умолчанию, такие как скорость обучения, количество эпох и затухание весов, и задали параметр `save_total_limit`, чтобы сохранять только 3 контрольные точки во время обучения - это сделано потому, что даже "маленькая" версия mT5 использует около Гигабайта места на жестком диске, и мы можем сэкономить немного места, ограничив количество копий, которые мы сохраняем.
+
+Аргумент `push_to_hub=True` позволит нам отправить модель в Hub после обучения; вы найдете розиторий под своим профилем пользователя в месте, определенном `output_dir`. Обратите внимание, что вы можете указать имя розитория, в который хотите отправить модель, с помощью аргумента `hub_model_id` (в частности, вам нужно использовать этот аргумент, чтобы отправить модель в организацию). Например, когда мы отправили модель в организацию `huggingface-course`, мы добавили `hub_model_id="huggingface-course/mt5-finetuned-amazon-en-es"` в `Seq2SeqTrainingArguments`.
+
+Следующее, что нам нужно сделать, это предоставить тренеру функцию `compute_metrics()`, чтобы мы могли оценить нашу модель во время обучения. Для суммаризации это немного сложнее, чем просто вызвать `rouge_score.compute()` для прогнозов модели, поскольку нам нужно _декодировать_ выводы и метки в текст, прежде чем мы сможем вычислить оценку ROUGE. Следующая функция делает именно это, а также использует функцию `sent_tokenize()` из `nltk` для разделения предложений резюме символом новой строки:
+
+```python
+import numpy as np
+
+
+def compute_metrics(eval_pred):
+    predictions, labels = eval_pred
+    # Декодируем сгенерированные резюме в текст
+    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+    # Заменяем -100 в метках, поскольку мы не можем их декодировать
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    # Декодируем эталонные резюме в текст
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    # ROUGE ожидает символ новой строки после каждого предложения
+    decoded_preds = ["\n".join(sent_tokenize(pred.strip())) for pred in decoded_preds]
+    decoded_labels = ["\n".join(sent_tokenize(label.strip())) for label in decoded_labels]
+    # Вычисляем оценки ROUGE
+    result = rouge_score.compute(
+        predictions=decoded_preds, references=decoded_labels, use_stemmer=True
+    )
+    # Извлекаем медианные оценки
+    result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
+    return {k: round(v, 4) for k, v in result.items()}
+```
+
+{/if}
+
+Далее нам нужно определить коллатор данных для нашей задачи преобразования последовательности в последовательность. Поскольку mT5 является моделью трансформера кодер-декодер, одна из тонкостей подготовки наших батчей заключается в том, что во время декодирования нам нужно сдвинуть метки вправо на единицу. Это необходимо для того, чтобы декодер видел только предыдущие метки, а не текущие или будущие, которые модели было бы легко запомнить. Это похоже на то, как маскированное самовнимание применяется к входным данным в задаче типа каузального языкового моделирования.
+
+К счастью,  Transformers предоставляет коллатор `DataCollatorForSeq2Seq`, который будет динамически дополнять входные данные и метки за нас. Чтобы инстанцировать этот коллатор, нам просто нужно предоставить `tokenizer` и `model`:
+
+{#if fw === 'pt'}
+
+```python
+from transformers import DataCollatorForSeq2Seq
+
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+```
+
+{:else}
+
+```python
+from transformers import DataCollatorForSeq2Seq
+
+data_collator = DataCollatorForSeq2Seq(tokenizer, model=model, return_tensors="tf")
+```
+
+{/if}
+
+Давайте посмотрим, что выдает этот коллатор, когда ему передается небольшой батч примеров. Во-первых, нам нужно удалить столбцы со строками, потому что коллатор не будет знать, как вставлять эти элементы:
+
+```python
+tokenized_datasets = tokenized_datasets.remove_columns(
+    books_dataset["train"].column_names
+)
+```
+
+Поскольку коллатор ожидает список словарей `dict`, где каждый словарь `dict` представляет один пример в датасете, нам также необходимо привести данные к ожидаемому формату, прежде чем передавать их коллатору:
+
+```python
+features = [tokenized_datasets["train"][i] for i in range(2)]
+data_collator(features)
+```
+
+```python out
+{'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+         1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]]), 'input_ids': tensor([[  1494,    259,   8622,    390,    259,    262,   2316,   3435,    955,
+            772,    281,    772,   1617,    263,    305,  14701,    260,   1385,
+           3031,    259,  24146,    332,   1037,    259,  43906,    305,    336,
+            260,      1,      0,      0,      0,      0,      0,      0],
+        [   259,  27531,  13483,    259,   7505,    260, 112240,  15192,    305,
+          53198,    276,    259,  74060,    263,    260,    459,  25640,    776,
+           2119,    336,    259,   2220,    259,  18896,    288,   4906,    288,
+           1037,   3931,    260,   7083, 101476,   1143,    260,      1]]), 'labels': tensor([[ 7483,   259,  2364, 15695,     1,  -100],
+        [  259, 27531, 13483,   259,  7505,     1]]), 'decoder_input_ids': tensor([[    0,  7483,   259,  2364, 15695,     1],
+        [    0,   259, 27531, 13483,   259,  7505]])}
+```
+
+Главное, что здесь нужно заметить, - это то, что первый пример длиннее второго, поэтому `input_ids` и `attention_mask` второго примера были дополнены справа токеном `[PAD]` (чей идентификатор равен `0`). Аналогично, мы видим, что `labels` были дополнены значением `-100`, чтобы функция потерь игнорировала токены дополнения. И наконец, мы видим новый `decoder_input_ids`, в котором метки сдвинуты вправо за счет вставки токена `[PAD]` в первую запись.
+
+{#if fw === 'pt'}
+
+Наконец-то у нас есть все необходимые ингредиенты для обучения! Теперь нам нужно просто создать тренер со стандартными аргументами:
+
+```python
+from transformers import Seq2SeqTrainer
+
+trainer = Seq2SeqTrainer(
+    model,
+    args,
+    train_dataset=tokenized_datasets["train"],
+    eval_dataset=tokenized_datasets["validation"],
+    data_collator=data_collator,
+    tokenizer=tokenizer,
+    compute_metrics=compute_metrics,
+)
+```
+
+и запустить наш цикл обучения:
+
+```python
+trainer.train()
+```
+
+Во время обучения вы должны видеть, как потери при обучении уменьшаются, а оценка ROUGE увеличивается с каждой эпохой. После завершения обучения вы можете увидеть итоговую оценку ROUGE, выполнив команду `Trainer.evaluate()`:
+
+```python
+trainer.evaluate()
+```
+
+```python out
+{'eval_loss': 3.028524398803711,
+ 'eval_rouge1': 16.9728,
+ 'eval_rouge2': 8.2969,
+ 'eval_rougeL': 16.8366,
+ 'eval_rougeLsum': 16.851,
+ 'eval_gen_len': 10.1597,
+ 'eval_runtime': 6.1054,
+ 'eval_samples_per_second': 38.982,
+ 'eval_steps_per_second': 4.914}
+```
+
+Из оценок видно, что наша модель значительно превзошла базовый уровень lead-3 - отлично! Осталось отправить веса модели в Hub, как показано ниже:
+
+```
+trainer.push_to_hub(commit_message="Training complete", tags="summarization")
+```
+
+```python out
+'https://huggingface.co/huggingface-course/mt5-finetuned-amazon-en-es/commit/aa0536b829b28e73e1e4b94b8a5aacec420d40e0'
+```
+
+Это позволит сохранить контрольную точку и файлы конфигурации в `output_dir`, а затем загрузить все файлы на Хаб. Указав аргумент `tags`, мы также гарантируем, что виджет на хабе будет предназначен для конвейера суммаризации, а не для конвейера генерации текста по умолчанию, связанного с архитектурой mT5 (более подробную информацию о тегах моделей можно найти в  документации по Hub). Вывод `trainer.push_to_hub()` - это URL на хэш Git-коммита, так что вы можете легко увидеть изменения, которые были сделаны в розитории модели!
+
+В завершение этого раздела рассмотрим, как можно дообучить mT5 с помощью низкоуровневых функций, предоставляемых  Accelerate.
+
+{:else}
+
+Мы почти готовы к обучению! Нам нужно только преобразовать наши датасеты в `tf.data.Dataset` с помощью коллатора данных, который мы определили выше, а затем выолнить `compile()` и `fit()` модели. Сначала датасеты:
+
+```python
+tf_train_dataset = model.prepare_tf_dataset(
+    tokenized_datasets["train"],
+    collate_fn=data_collator,
+    shuffle=True,
+    batch_size=8,
+)
+tf_eval_dataset = model.prepare_tf_dataset(
+    tokenized_datasets["validation"],
+    collate_fn=data_collator,
+    shuffle=False,
+    batch_size=8,
+)
+```
+
+Теперь определяем гиперпараметры обучения и компилируем:
+
+```python
+from transformers import create_optimizer
+import tensorflow as tf
+
+# Количество шагов обучения - это количество примеров в датасете, разделенное на размер батча, затем умноженное
+# на общее количество эпох. Обратите внимание, что tf_train_dataset здесь - это батч tf.data.Dataset,
+# а не оригинальный датасет Hugging Face, поэтому его len() уже равен num_samples // batch_size.
+num_train_epochs = 8
+num_train_steps = len(tf_train_dataset) * num_train_epochs
+model_name = model_checkpoint.split("/")[-1]
+
+optimizer, schedule = create_optimizer(
+    init_lr=5.6e-5,
+    num_warmup_steps=0,
+    num_train_steps=num_train_steps,
+    weight_decay_rate=0.01,
+)
+
+model.compile(optimizer=optimizer)
+
+# Обучение со смешанной точностью float16
+tf.keras.mixed_precision.set_global_policy("mixed_float16")
+```
+
+И наконец, мы подгоняем модель. Мы используем `PushToHubCallback` для сохранения модели на Hub после каждой эпохи, что позволит нам использовать ее позже для инференса:
+
+```python
+from transformers.keras_callbacks import PushToHubCallback
+
+callback = PushToHubCallback(
+    output_dir=f"{model_name}-finetuned-amazon-en-es", tokenizer=tokenizer
+)
+
+model.fit(
+    tf_train_dataset, validation_data=tf_eval_dataset, callbacks=[callback], epochs=8
+)
+```
+
+Мы получили некоторые значения потерь во время обучения, но на самом деле нам хотелось бы увидеть метрику ROUGE, которую мы вычисляли ранее. Чтобы получить эти метрики, нам нужно сгенерировать выходные данные модели и преобразовать их в строки. Давайте создадим несколько списков меток и прогнозов для сравнения с метрикой ROUGE (обратите внимание, что если вы получаете ошибки импорта в этом разделе, вам может понадобиться команда `!pip install tqdm`). Мы также используем трюк, который значительно повышает производительность, - компиляцию генерируемого кода с помощью XLA, ускоренного компилятора линейной алгебры TensorFlow. XLA применяет различные оптимизации к графу вычислений модели, что приводит к значительному увеличению скорости и использования памяти. Как описано в Hugging Face блоге, XLA работает лучше всего, когда формы наших входных данных не слишком сильно различаются. Чтобы справиться с этим, мы дополним наши входные данные до кратных 128 и создадим новый датасет с помощью дополняющего коллатора, а затем применим декоратор `@tf.function(jit_compile=True)` к нашей функции генерации, который помечает всю функцию для компиляции с помощью XLA.
+
+```python
+from tqdm import tqdm
+import numpy as np
+
+generation_data_collator = DataCollatorForSeq2Seq(
+    tokenizer, model=model, return_tensors="tf", pad_to_multiple_of=320
+)
+
+tf_generate_dataset = model.prepare_tf_dataset(
+    tokenized_datasets["validation"],
+    collate_fn=generation_data_collator,
+    shuffle=False,
+    batch_size=8,
+    drop_remainder=True,
+)
+
+
+@tf.function(jit_compile=True)
+def generate_with_xla(batch):
+    return model.generate(
+        input_ids=batch["input_ids"],
+        attention_mask=batch["attention_mask"],
+        max_new_tokens=32,
+    )
+
+
+all_preds = []
+all_labels = []
+for batch, labels in tqdm(tf_generate_dataset):
+    predictions = generate_with_xla(batch)
+    decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+    labels = labels.numpy()
+    labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+    decoded_preds = ["\n".join(sent_tokenize(pred.strip())) for pred in decoded_preds]
+    decoded_labels = ["\n".join(sent_tokenize(label.strip())) for label in decoded_labels]
+    all_preds.extend(decoded_preds)
+    all_labels.extend(decoded_labels)
+```
+
+Когда у нас есть списки строк меток и прогнозов, вычислить оценку ROUGE очень просто:
+
+```python
+result = rouge_score.compute(
+    predictions=decoded_preds, references=decoded_labels, use_stemmer=True
+)
+result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
+{k: round(v, 4) for k, v in result.items()}
+```
+
+```
+{'rouge1': 31.4815, 'rouge2': 25.4386, 'rougeL': 31.4815, 'rougeLsum': 31.4815}
+```
+
+
+{/if}
+
+{#if fw === 'pt'}
+
+## Дообучение mT5 с  Accelerate[[fine-tuning-mt5-with-accelerate]]
+
+Дообучение нашей модели с помощью  Accelerate очень похоже на пример с классификацией текста, который мы рассматривали в Главе 3. Основные отличия заключаются в необходимости явной генерации резюме во время обучения и определении способа вычисления оценок ROUGE (напомним, что `Seq2SeqTrainer` позаботился о генерации за нас). Давайте посмотрим, как мы можем реализовать эти два требования в  Accelerate!
+
+### Подготовка всего к обучению[[preparing-everything-for-training]]
+
+Первое, что нам нужно сделать, это создать `DataLoader` для каждой из наших частей. Поскольку загрузчики данных PyTorch ожидают батч тензоров, нам нужно задать формат `"torch"` в наших датасетах:
+
+```python
+tokenized_datasets.set_format("torch")
+```
+
+Теперь, когда у нас есть датасеты, состоящие только из тензоров, следующее, что нужно сделать, - это снова инстанцировать `DataCollatorForSeq2Seq`. Для этого нам нужно предоставить свежую версию модели, поэтому давайте снова загрузим ее из нашего кэша:
+
+```python
+model = AutoModelForSeq2SeqLM.from_pretrained(model_checkpoint)
+```
+
+Затем мы можем инстанцировать коллатор данных и использовать его для определения наших загрузчиков данных:
+
+```python
+from torch.utils.data import DataLoader
+
+batch_size = 8
+train_dataloader = DataLoader(
+    tokenized_datasets["train"],
+    shuffle=True,
+    collate_fn=data_collator,
+    batch_size=batch_size,
+)
+eval_dataloader = DataLoader(
+    tokenized_datasets["validation"], collate_fn=data_collator, batch_size=batch_size
+)
+```
+
+Следующее, что нужно сделать, это определить оптимизатор, который мы хотим использовать. Как и в других наших примерах, мы будем использовать `AdamW`, который хорошо работает для большинства задач:
+
+```python
+from torch.optim import AdamW
+
+optimizer = AdamW(model.parameters(), lr=2e-5)
+```
+
+Наконец, мы передаем нашу модель, оптимизатор и загрузчики данных в метод `accelerator.prepare()`:
+
+```python
+from accelerate import Accelerator
+
+accelerator = Accelerator()
+model, optimizer, train_dataloader, eval_dataloader = accelerator.prepare(
+    model, optimizer, train_dataloader, eval_dataloader
+)
+```
+
+
+
+Теперь, когда мы подготовили наши объекты, осталось сделать три вещи:
+
+* Определить график скорости обучения.
+* Реализовать функцию для постобработки резюме для оценки.
+* Создать розиторий на Hub, в который мы можем отправить нашу модель.
+
+В качестве графика скорости обучения мы будем использовать стандартный линейный график из предыдущих разделов:
+
+```python
+from transformers import get_scheduler
+
+num_train_epochs = 10
+num_update_steps_per_epoch = len(train_dataloader)
+num_training_steps = num_train_epochs * num_update_steps_per_epoch
+
+lr_scheduler = get_scheduler(
+    "linear",
+    optimizer=optimizer,
+    num_warmup_steps=0,
+    num_training_steps=num_training_steps,
+)
+```
+
+Для постобработки нам нужна функция, которая разбивает сгенерированные резюме на предложения, разделенные символами новой строки. Именно такой формат ожидает метрика ROUGE, и мы можем достичь этого с помощью следующего фрагмента кода:
+
+```python
+def postprocess_text(preds, labels):
+    preds = [pred.strip() for pred in preds]
+    labels = [label.strip() for label in labels]
+
+    # ROUGE ожидает символ новой строки после каждого предложения
+    preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in preds]
+    labels = ["\n".join(nltk.sent_tokenize(label)) for label in labels]
+
+    return preds, labels
+```
+
+Это должно показаться вам знакомым, если вы помните, как мы определяли функцию `compute_metrics()` для `Seq2SeqTrainer`.
+
+Наконец, нам нужно создать розиторий модели на Hugging Face Hub. Для этого мы можем использовать библиотеку Hub с соответствующим заголовком. Нам нужно только задать имя нашего розитория, а в библиотеке есть служебная функция для объединения идентификатора розитория с профилем пользователя:
+
+```python
+from huggingface_hub import get_full_repo_name
+
+model_name = "test-bert-finetuned-squad-accelerate"
+repo_name = get_full_repo_name(model_name)
+repo_name
+```
+
+```python out
+'lewtun/mt5-finetuned-amazon-en-es-accelerate'
+```
+
+Теперь мы можем использовать имя этого розитория для клонирования локальной версии в каталог результатов, в котором будут храниться результаты обучения:
+
+```python
+from huggingface_hub import Repository
+
+output_dir = "results-mt5-finetuned-squad-accelerate"
+repo = Repository(output_dir, clone_from=repo_name)
+```
+
+Это позволит нам отправить результаты в Hub, вызвав метод `repo.push_to_hub()` во время обучения! Теперь давайте завершим наш анализ, написав цикл обучения.
+
+### Цикл обучения[[training-loop]]
+
+Цикл обучения суммаризации очень похож на другие примеры  Accelerate, с которыми мы сталкивались, и состоит из четырех основных этапов:
+
+1. Обучение модели путем итерации по всем примерам в `train_dataloader` на каждой эпохе.
+2. Генерация резюме моделью в конце каждой эпохи, сначала генерируются токены, а затем они (и эталонные резюме) декодируются в текст.
+3. Вычисление оценок ROUGE с помощью тех же приемов, которые мы рассмотрели ранее.
+4. Сохранение контрольных точек и отправка всего в Hub. Здесь мы полагаемся на полезный аргумент `blocking=False` объекта `Repository`, чтобы мы могли отправить контрольные точки на каждой эпохе _асинхронно_. Это позволяет нам продолжать обучение, не дожидаясь медленной загрузки, связанной с моделью размером в гигабайт!
+
+Эти шаги можно увидеть в следующем блоке кода:
+
+```python
+from tqdm.auto import tqdm
+import torch
+import numpy as np
+
+progress_bar = tqdm(range(num_training_steps))
+
+for epoch in range(num_train_epochs):
+    # Обучение
+    model.train()
+    for step, batch in enumerate(train_dataloader):
+        outputs = model(**batch)
+        loss = outputs.loss
+        accelerator.backward(loss)
+
+        optimizer.step()
+        lr_scheduler.step()
+        optimizer.zero_grad()
+        progress_bar.update(1)
+
+    # Оценка
+    model.eval()
+    for step, batch in enumerate(eval_dataloader):
+        with torch.no_grad():
+            generated_tokens = accelerator.unwrap_model(model).generate(
+                batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+            )
+
+            generated_tokens = accelerator.pad_across_processes(
+                generated_tokens, dim=1, pad_index=tokenizer.pad_token_id
+            )
+            labels = batch["labels"]
+
+            # Если мы не дополнили до максимальной длины, нам нужно дополнить и метки
+            labels = accelerator.pad_across_processes(
+                batch["labels"], dim=1, pad_index=tokenizer.pad_token_id
+            )
+
+            generated_tokens = accelerator.gather(generated_tokens).cpu().numpy()
+            labels = accelerator.gather(labels).cpu().numpy()
+
+            # Заменяем -100 в метках, поскольку мы не можем их декодировать
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+            if isinstance(generated_tokens, tuple):
+                generated_tokens = generated_tokens[0]
+            decoded_preds = tokenizer.batch_decode(
+                generated_tokens, skip_special_tokens=True
+            )
+            decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+            decoded_preds, decoded_labels = postprocess_text(
+                decoded_preds, decoded_labels
+            )
+
+            rouge_score.add_batch(predictions=decoded_preds, references=decoded_labels)
+
+    # Вычисляем метрики
+    result = rouge_score.compute()
+    # Извлекаем медианные оценки ROUGE
+    result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
+    result = {k: round(v, 4) for k, v in result.items()}
+    print(f"Epoch {epoch}:", result)
+
+    # Сохранение и загрузка
+    accelerator.wait_for_everyone()
+    unwrapped_model = accelerator.unwrap_model(model)
+    unwrapped_model.save_pretrained(output_dir, save_function=accelerator.save)
+    if accelerator.is_main_process:
+        tokenizer.save_pretrained(output_dir)
+        repo.push_to_hub(
+            commit_message=f"Training in progress epoch {epoch}", blocking=False
+        )
+```
+
+```python out
+Epoch 0: {'rouge1': 5.6351, 'rouge2': 1.1625, 'rougeL': 5.4866, 'rougeLsum': 5.5005}
+Epoch 1: {'rouge1': 9.8646, 'rouge2': 3.4106, 'rougeL': 9.9439, 'rougeLsum': 9.9306}
+Epoch 2: {'rouge1': 11.0872, 'rouge2': 3.3273, 'rougeL': 11.0508, 'rougeLsum': 10.9468}
+Epoch 3: {'rouge1': 11.8587, 'rouge2': 4.8167, 'rougeL': 11.7986, 'rougeLsum': 11.7518}
+Epoch 4: {'rouge1': 12.9842, 'rouge2': 5.5887, 'rougeL': 12.7546, 'rougeLsum': 12.7029}
+Epoch 5: {'rouge1': 13.4628, 'rouge2': 6.4598, 'rougeL': 13.312, 'rougeLsum': 13.2913}
+Epoch 6: {'rouge1': 12.9131, 'rouge2': 5.8914, 'rougeL': 12.6896, 'rougeLsum': 12.5701}
+Epoch 7: {'rouge1': 13.3079, 'rouge2': 6.2994, 'rougeL': 13.1536, 'rougeLsum': 13.1194}
+Epoch 8: {'rouge1': 13.96, 'rouge2': 6.5998, 'rougeL': 13.9123, 'rougeLsum': 13.7744}
+Epoch 9: {'rouge1': 14.1192, 'rouge2': 7.0059, 'rougeL': 14.1172, 'rougeLsum': 13.9509}
+```
+
+Вот и все! После запуска у вас будет модель и результаты, очень похожие на те, что мы получили с помощью `Trainer`.
+
+{/if}
+
+## Использование дообученной вами модели[[using-your-fine-tuned-model]]
+
+После того как вы отправили модель в Hub, вы можете работать с ней либо с помощью виджета инференса, либо с помощью объекта `pipeline`, как показано ниже:
+
+```python
+from transformers import pipeline
+
+hub_model_id = "huggingface-course/mt5-small-finetuned-amazon-en-es"
+summarizer = pipeline("summarization", model=hub_model_id)
+```
+
+Мы можем передать в наш конвейер несколько примеров из тестового набора (которые модель не видела), чтобы получить представление о качестве резюме. Для начала давайте реализуем простую функцию, которая будет показывать обзор, заголовок и сгенерированное резюме вместе:
+
+```python
+def print_summary(idx):
+    review = books_dataset["test"][idx]["review_body"]
+    title = books_dataset["test"][idx]["review_title"]
+    summary = summarizer(books_dataset["test"][idx]["review_body"])[0]["summary_text"]
+    print(f"'>>> Review: {review}'")
+    print(f"\n'>>> Title: {title}'")
+    print(f"\n'>>> Summary: {summary}'")
+```
+
+Давайте посмотрим на один из английских примеров, которые мы получаем:
+
+```python
+print_summary(100)
+```
+
+```python out
+'>>> Review: Nothing special at all about this product... the book is too small and stiff and hard to write in. The huge sticker on the back doesn’t come off and looks super tacky. I would not purchase this again. I could have just bought a journal from the dollar store and it would be basically the same thing. It’s also really expensive for what it is.'
+
+'>>> Title: Not impressed at all... buy something else'
+
+'>>> Summary: Nothing special at all about this product'
+```
+
+Это не так уж плохо! Мы видим, что наша модель действительно способна выполнять _абстрактную_ суммуризацию, дополняя части обзора новыми словами. И, пожалуй, самый интересный аспект нашей модели - это то, что она билингвистическая, так что мы можем генерировать резюме и для испанских рецензий:
+
+```python
+print_summary(0)
+```
+
+```python out
+'>>> Review: Es una trilogia que se hace muy facil de leer. Me ha gustado, no me esperaba el final para nada'
+
+'>>> Title: Buena literatura para adolescentes'
+
+'>>> Summary: Muy facil de leer'
+```
+
+Резюме переводится как "Very easy to read" на английском языке, что, как мы видим, в данном случае было непосредственно взято из обзора. Тем не менее, это демонстрирует универсальность модели mT5 и дает вам представление о том, каково это - работать с многоязычным корпусом!
+
+Далее мы обратимся к несколько более сложной задаче: обучению языковой модели с нуля.

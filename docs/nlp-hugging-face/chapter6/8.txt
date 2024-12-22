@@ -1,0 +1,374 @@
+# Создание токенизатора, блок за блоком[[building-a-tokenizer-block-by-block]]
+
+
+
+Далее следует этап предварительной токенизации. Опять же, есть готовый `BertPreTokenizer`, который мы можем использовать:
+
+```python
+tokenizer.pre_tokenizer = pre_tokenizers.BertPreTokenizer()
+```
+
+Или мы можем создать его с нуля:
+
+```python
+tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+```
+
+Обратите внимание, что токенизатор `Whitespace` разделяет пробельные символы и все символы, которые не являются буквами, цифрами или символом подчеркивания, поэтому технически он разделяет пробельные символы и знаки пунктуации:
+
+```python
+tokenizer.pre_tokenizer.pre_tokenize_str("Let's test my pre-tokenizer.")
+```
+
+```python out
+[('Let', (0, 3)), ("'", (3, 4)), ('s', (4, 5)), ('test', (6, 10)), ('my', (11, 13)), ('pre', (14, 17)),
+ ('-', (17, 18)), ('tokenizer', (18, 27)), ('.', (27, 28))]
+```
+
+Если вы хотите выполнять разделение только по пробельным символам, то вместо этого следует использовать предварительный токенизатор `WhitespaceSplit`:
+
+```python
+pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+pre_tokenizer.pre_tokenize_str("Let's test my pre-tokenizer.")
+```
+
+```python out
+[("Let's", (0, 5)), ('test', (6, 10)), ('my', (11, 13)), ('pre-tokenizer.', (14, 28))]
+```
+
+Как и в случае с нормализаторами, вы можете использовать `Sequence` для комбинирования нескольких предварительных токенизаторов:
+
+```python
+pre_tokenizer = pre_tokenizers.Sequence(
+    [pre_tokenizers.WhitespaceSplit(), pre_tokenizers.Punctuation()]
+)
+pre_tokenizer.pre_tokenize_str("Let's test my pre-tokenizer.")
+```
+
+```python out
+[('Let', (0, 3)), ("'", (3, 4)), ('s', (4, 5)), ('test', (6, 10)), ('my', (11, 13)), ('pre', (14, 17)),
+ ('-', (17, 18)), ('tokenizer', (18, 27)), ('.', (27, 28))]
+```
+
+Следующий шаг в конвейере токенизации - обработка входных данных с помощью модели. Мы уже указали нашу модель в инициализации, но нам все еще нужно обучить ее, для чего потребуется `WordPieceTrainer`. Главное, что нужно помнить при инстанцировании тренера в  Tokenizers, это то, что вам нужно передать ему все специальные токены, которые вы собираетесь использовать - иначе он не добавит их в словарь, поскольку их нет в обучающем корпусе:
+
+```python
+special_tokens = ["[UNK]", "[PAD]", "[CLS]", "[SEP]", "[MASK]"]
+trainer = trainers.WordPieceTrainer(vocab_size=25000, special_tokens=special_tokens)
+```
+
+Помимо указания `vocab_size` и `special_tokens`, мы можем задать `min_frequency` (количество раз, которое должен встретиться токен, чтобы быть включенным в словарь) или изменить `continuing_subword_prefix` (если мы хотим использовать что-то отличное от `##`).
+
+Чтобы обучить нашу модель с помощью итератора, который мы определили ранее, достаточно выполнить эту команду:
+
+```python
+tokenizer.train_from_iterator(get_training_corpus(), trainer=trainer)
+```
+
+Мы также можем использовать текстовые файлы для обучения нашего токенизатора, что будет выглядеть следующим образом (предварительно мы повторно инициализируем модель с пустым `WordPiece`):
+
+```python
+tokenizer.model = models.WordPiece(unk_token="[UNK]")
+tokenizer.train(["wikitext-2.txt"], trainer=trainer)
+```
+
+В обоих случаях мы можем проверить работу токенизатора на тексте, вызвав метод `encode()`:
+
+```python
+encoding = tokenizer.encode("Let's test this tokenizer.")
+print(encoding.tokens)
+```
+
+```python out
+['let', "'", 's', 'test', 'this', 'tok', '##eni', '##zer', '.']
+```
+
+Полученное `encoding` представляет собой `Encoding`, которое содержит все необходимые результаты работы токенизатора в разных атрибутах: `ids`, `type_ids`, `tokens`, `offsets`, `attention_mask`, `special_tokens_mask` и `overflowing`.
+
+Последний шаг в конвейере токенизации - постобработка. Нам нужно добавить токен `[CLS]` в начале и токен `[SEP]` в конце (или после каждого предложения, если у нас есть пара предложений). Для этого мы будем использовать `TemplateProcessor`, но сначала нам нужно узнать идентификаторы токенов `[CLS]` и `[SEP]` в словаре:
+
+```python
+cls_token_id = tokenizer.token_to_id("[CLS]")
+sep_token_id = tokenizer.token_to_id("[SEP]")
+print(cls_token_id, sep_token_id)
+```
+
+```python out
+(2, 3)
+```
+
+Чтобы написать шаблон для `TemplateProcessor`, мы должны указать, как обрабатывать одно предложение и пару предложений. Для обоих случаев мы указываем специальные токены, которые мы хотим использовать; первое (или одиночное) предложение представлено `$A`, а второе предложение (если кодируется пара) представлено `$B`. Для каждого из них (специальных токенов и предложений) мы также указываем соответствующий идентификатор типа токена (token type ID) после двоеточия. 
+
+Таким образом, классический шаблон BERT определяется следующим образом:
+
+```python
+tokenizer.post_processor = processors.TemplateProcessing(
+    single=f"[CLS]:0 $A:0 [SEP]:0",
+    pair=f"[CLS]:0 $A:0 [SEP]:0 $B:1 [SEP]:1",
+    special_tokens=[("[CLS]", cls_token_id), ("[SEP]", sep_token_id)],
+)
+```
+
+Обратите внимание, что нам нужно передать идентификаторы специальных токенов, чтобы токенизатор мог правильно преобразовать их в их идентификаторы.
+
+Как только это будет добавлено, вернемся к нашему предыдущему примеру:
+
+```python
+encoding = tokenizer.encode("Let's test this tokenizer.")
+print(encoding.tokens)
+```
+
+```python out
+['[CLS]', 'let', "'", 's', 'test', 'this', 'tok', '##eni', '##zer', '.', '[SEP]']
+```
+
+И на паре предложений мы получаем правильный результат:
+
+```python
+encoding = tokenizer.encode("Let's test this tokenizer...", "on a pair of sentences.")
+print(encoding.tokens)
+print(encoding.type_ids)
+```
+
+```python out
+['[CLS]', 'let', "'", 's', 'test', 'this', 'tok', '##eni', '##zer', '...', '[SEP]', 'on', 'a', 'pair', 'of', 'sentences', '.', '[SEP]']
+[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1]
+```
+
+Мы почти закончили создание этого токенизатора с нуля - остался последний шаг - добавить декодер:
+
+```python
+tokenizer.decoder = decoders.WordPiece(prefix="##")
+```
+
+Давайте проверим его на нашем предыдущем `encoding`:
+
+```python
+tokenizer.decode(encoding.ids)
+```
+
+```python out
+"let's test this tokenizer... on a pair of sentences."
+```
+
+Отлично! Мы можем сохранить наш токенизатор в единственном JSON-файле следующим образом:
+
+```python
+tokenizer.save("tokenizer.json")
+```
+
+Затем мы можем загрузить этот файл в объект `Tokenizer` с помощью метода `from_file()`:
+
+```python
+new_tokenizer = Tokenizer.from_file("tokenizer.json")
+```
+
+Чтобы использовать этот токенизатор в  Transformers, мы должны обернуть его в `PreTrainedTokenizerFast`. Мы можем использовать либо общий класс, либо, если наш токенизатор соответствует существующей модели, использовать этот класс (здесь `BertTokenizerFast`). Если вы используете этот урок для создания нового токенизатора, вам придется использовать первый вариант.
+
+Чтобы обернуть токенизатор в `PreTrainedTokenizerFast`, мы можем либо передать собранный нами токенизатор как `tokenizer_object`, либо передать сохраненный файл токенизатора как `tokenizer_file`. Главное помнить, что нам придется вручную задавать все специальные токены, поскольку класс не может определить из объекта `tokenizer`, какой токен является токеном маски, токеном `[CLS]` и т. д.:
+
+```python
+from transformers import PreTrainedTokenizerFast
+
+wrapped_tokenizer = PreTrainedTokenizerFast(
+    tokenizer_object=tokenizer,
+    # tokenizer_file="tokenizer.json", # В качестве альтернативы можно загрузить из файла токенизатора.
+    unk_token="[UNK]",
+    pad_token="[PAD]",
+    cls_token="[CLS]",
+    sep_token="[SEP]",
+    mask_token="[MASK]",
+)
+```
+
+Если вы используете определенный класс токенизатора (например, `BertTokenizerFast`), вам нужно будет указать только специальные токены, которые отличаются от токенов по умолчанию (здесь их нет):
+
+```python
+from transformers import BertTokenizerFast
+
+wrapped_tokenizer = BertTokenizerFast(tokenizer_object=tokenizer)
+```
+
+Затем вы можете использовать этот токенизатор, как и любой другой токенизатор  Transformers. Вы можете сохранить его с помощью метода `save_pretrained()` или загрузить на хаб с помощью метода `push_to_hub()`.
+
+Теперь, когда мы рассмотрели, как создать токенизатор WordPiece, давайте сделаем то же самое для токенизатора BPE. Мы будем двигаться немного быстрее, поскольку вы знаете все шаги, и подчеркнем только различия.
+
+## Создание токенизатора BPE с нуля[[building-a-bpe-tokenizer-from-scratch]]
+
+Теперь давайте создадим токенизатор GPT-2. Как и в случае с токенизатором BERT, мы начнем с инициализации `Tokenizer` с моделью BPE:
+
+```python
+tokenizer = Tokenizer(models.BPE())
+```
+
+Также, как и в случае с BERT, мы могли бы инициализировать эту модель словарем, если бы он у нас был (в этом случае нам нужно было бы передать `vocab` и `merges`), но поскольку мы будем обучать с нуля, нам не нужно этого делать. Нам также не нужно указывать `unk_token`, потому что GPT-2 использует byte-level BPE, который не требует этого.
+
+GPT-2 не использует нормализатор, поэтому мы пропускаем этот шаг и переходим непосредственно к предварительной токенизации:
+
+```python
+tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+```
+
+Опция, которую мы добавили к `ByteLevel`, заключается в том, чтобы не добавлять пробел в начале предложения (в противном случае это происходит по умолчанию). Мы можем посмотреть на предварительную токенизацию примера текста, как было показано ранее:
+
+```python
+tokenizer.pre_tokenizer.pre_tokenize_str("Let's test pre-tokenization!")
+```
+
+```python out
+[('Let', (0, 3)), ("'s", (3, 5)), ('Ġtest', (5, 10)), ('Ġpre', (10, 14)), ('-', (14, 15)),
+ ('tokenization', (15, 27)), ('!', (27, 28))]
+```
+
+Далее следует модель, которую нужно обучить. Для GPT-2 единственным специальным токеном является токен конца текста:
+
+```python
+trainer = trainers.BpeTrainer(vocab_size=25000, special_tokens=[""])
+tokenizer.train_from_iterator(get_training_corpus(), trainer=trainer)
+```
+
+Как и в случае с `WordPieceTrainer`, а также `vocab_size` и `special_tokens`, мы можем указать `min_frequency`, если хотим, или если у нас есть суффикс конца слова (например, ``), мы можем задать его с помощью `end_of_word_suffix`. 
+
+Этот токенизатор также может быть обучен на текстовых файлах:
+
+```python
+tokenizer.model = models.BPE()
+tokenizer.train(["wikitext-2.txt"], trainer=trainer)
+```
+
+Давайте посмотрим на пример токенизации текста:
+
+```python
+encoding = tokenizer.encode("Let's test this tokenizer.")
+print(encoding.tokens)
+```
+
+```python out
+['L', 'et', "'", 's', 'Ġtest', 'Ġthis', 'Ġto', 'ken', 'izer', '.']
+```
+
+Мы применяем постобработку на уровне байтов для токенизатора GPT-2 следующим образом:
+
+```python
+tokenizer.post_processor = processors.ByteLevel(trim_offsets=False)
+```
+
+Опция `trim_offsets = False` указывает постпроцессору, что мы должны оставить смещения токенов, начинающихся с 'Ġ', как есть: таким образом, начало смещения будет указывать на пробел перед словом, а не на первый символ слова (поскольку пробел технически является частью токена). Давайте посмотрим на результат с текстом, который мы только что закодировали, где `'Ġtest'` - это токен с индексом 4:
+
+```python
+sentence = "Let's test this tokenizer."
+encoding = tokenizer.encode(sentence)
+start, end = encoding.offsets[4]
+sentence[start:end]
+```
+
+```python out
+' test'
+```
+
+Наконец, мы добавляем декодер на уровне байтов:
+
+```python
+tokenizer.decoder = decoders.ByteLevel()
+```
+
+и мы сможем перепроверить, правильно ли он работает:
+
+```python
+tokenizer.decode(encoding.ids)
+```
+
+```python out
+"Let's test this tokenizer."
+```
+
+Отлично! Теперь, когда мы закончили, мы можем сохранить токенизатор, как раньше, и обернуть его в `PreTrainedTokenizerFast` или `GPT2TokenizerFast`, если мы хотим использовать его в  Transformers:
+
+```python
+from transformers import PreTrainedTokenizerFast
+
+wrapped_tokenizer = PreTrainedTokenizerFast(
+    tokenizer_object=tokenizer,
+    bos_token="",
+    eos_token="",
+)
+```
+
+или:
+
+```python
+from transformers import GPT2TokenizerFast
+
+wrapped_tokenizer = GPT2TokenizerFast(tokenizer_object=tokenizer)
+```
+
+В качестве последнего примера мы покажем вам, как создать токенизатор Unigram с нуля.
+
+## Создание токенизатора Unigram с нуля[[building-a-unigram-tokenizer-from-scratch]]
+
+Теперь давайте построим токенизатор XLNet. Как и в предыдущих токенизаторах, мы начнем с инициализации `Tokenizer` с моделью Unigram:
+
+```python
+tokenizer = Tokenizer(models.Unigram())
+```
+
+Опять же, мы могли бы инициализировать эту модель словарем, если бы он у нас был.
+
+Для нормализации XLNet использует несколько замен (которые пришли из SentencePiece):
+
+```python
+from tokenizers import Regex
+
+tokenizer.normalizer = normalizers.Sequence(
+    [
+        normalizers.Replace("``", '"'),
+        normalizers.Replace("''", '"'),
+        normalizers.NFKD(),
+        normalizers.StripAccents(),
+        normalizers.Replace(Regex(" {2,}"), " "),
+    ]
+)
+```
+
+Он заменяет  и  with  и любую последовательность из двух или более пробелов на один пробел, а также удаляет ударения в токенезируемых текстах.
+
+Предварительный токенизатор, который должен использоваться для любого токенизатора SentencePiece, - это `Metaspace`:
+
+```python
+tokenizer.pre_tokenizer = pre_tokenizers.Metaspace()
+```
+
+Мы можем посмотреть на предварительную токенизацию примера текста, как было показано ранее:
+
+```python
+tokenizer.pre_tokenizer.pre_tokenize_str("Let's test the pre-tokenizer!")
+```
+
+```python out
+[("Let's", (0, 5)), ('test', (5, 10)), ('the', (10, 14)), ('pre-tokenizer!', (14, 29))]
+```
+
+Далее следует модель, которую нужно обучить. В XLNet довольно много специальных токенов:
+
+```python
+special_tokens = [""]
+trainer = trainers.UnigramTrainer(
+    vocab_size=25000, special_tokens=special_tokens, unk_token="",
+    unk_token="",
+    pad_token="",
+    cls_token="",
+    sep_token="",
+    mask_token="",
+    padding_side="left",
+)
+```
+
+Или альтернативно:
+
+```python
+from transformers import XLNetTokenizerFast
+
+wrapped_tokenizer = XLNetTokenizerFast(tokenizer_object=tokenizer)
+```
+
+Теперь, когда вы увидели, как различные блоки используются для создания существующих токенизаторов, вы должны быть в состоянии написать любой токенизатор, который вы хотите, с помощью библиотеки  Tokenizers и использовать его в  Transformers.
