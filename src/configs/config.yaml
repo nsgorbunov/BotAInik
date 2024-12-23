@@ -1,10 +1,9 @@
 llm_type: "mistral"
 openai_api_key: ""
-mistral_api_key: "--"
-langsmith_api_key: "--"
+mistral_api_key: ""
+langsmith_api_key: ""
 chunk_size: 300
 chunk_overlap: 50
 excel_input_path: "data/input.xlsx"
 chroma_db_dir: "chroma_db"
 embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
-

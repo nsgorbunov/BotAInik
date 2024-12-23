@@ -7,7 +7,7 @@ from src.rag_pipeline.rag_chain import RAGChain
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-os.environ["LANGCHAIN_API_KEY"] = "---"
+os.environ["LANGCHAIN_API_KEY"] = "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"
 os.environ["LANGCHAIN_PROJECT"] = "BotAInik"
 
 app = FastAPI()

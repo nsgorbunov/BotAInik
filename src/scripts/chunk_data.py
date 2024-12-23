@@ -22,7 +22,7 @@ def chunk_text(text: str, chunk_size: int, chunk_overlap: int):
             break
     return chunks
 
-def process_folder(folder_path: str, output_excel: str = "data/output.xlsx"):
+def process_folder(folder_path: str, output_csv: str = "data/output.csv"):
     all_chunks = []
     processed_files = []
     skipped_chunks = 0
@@ -51,8 +51,8 @@ def process_folder(folder_path: str, output_excel: str = "data/output.xlsx"):
 
     try:
         df = pd.DataFrame(all_chunks)
-        df.to_excel(output_excel, index=False, engine="openpyxl")
-        print(f"Сохранено в {output_excel}")
+        df.to_csv(output_csv, index=False, encoding='utf-8')
+        print(f"Сохранено в {output_csv}")
     except Exception as e:
         print(f"[ERROR] Не удалось сохранить файл: {e}")
 
@@ -65,7 +65,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Chunk files from a folder.")
     parser.add_argument("--folder", type=str, required=True, help="Path to the folder with docs.")
-    parser.add_argument("--output", type=str, default="data/output.xlsx", help="Excel output file.")
+    parser.add_argument("--output", type=str, default="data/output.csv", help="CSV output file.")
     args = parser.parse_args()
 
     process_folder(args.folder, args.output)

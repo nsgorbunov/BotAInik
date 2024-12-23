@@ -2,13 +2,24 @@ import chromadb
 from src.rag_pipeline.encoder import encode_text
 from src.config import CHROMA_DB_DIR
 
+
 class ChromaRetriever:
     def __init__(self, collection_name: str = "bota_inik"):
         self.client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
         self.collection = self.client.get_or_create_collection(collection_name)
 
     def similarity_search(self, query: str, top_k: int = 3):
-        """Ищем наиболее релевантные документы по косинусной близости + учёт importance"""
+        """
+        Ищем наиболее релевантные документы по косинусной близости с учётом важности.
+        Более низкое значение 'importance' увеличивает итоговый скор.
+
+        Args:
+            query (str): Запрос для поиска.
+            top_k (int): Количество топовых результатов для возврата.
+
+        Returns:
+            List[Tuple[str, dict, float]]: Список кортежей (doc_id, metadata, custom_score).
+        """
         query_embedding = encode_text(query).tolist()  # Преобразуем в список
 
         # ищем в Chroma
@@ -23,8 +34,12 @@ class ChromaRetriever:
             # Chroma хранит distance = cosine distance
             similarity = 1.0 - dist
             importance = float(metadata.get("bullet_importance", 1.0))
-            # Добавляем бонус за importance
-            custom_score = similarity + 0.01 * importance
+
+            # обеспечиваем, что importance не меньше 1, чтобы избежать деления на ноль или отрицательных значений
+            importance = max(1.0, importance)
+
+            # Учитываем важность: чем ниже, тем лучше
+            custom_score = similarity + (0.1 / importance)
             scored_results.append((doc_id, metadata, custom_score))
 
         # сортируем по custom_score убыванию

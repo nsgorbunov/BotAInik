@@ -16,18 +16,18 @@ cd BotAInik
 
 Запустите:
 ```
-poetry run python src/scripts/chunk_data.py --folder docs/ --output data/output.xlsx
+poetry run python src/scripts/chunk_data.py --folder docs/ --output data/output.csv
 ```
 Это создаст data/output.xlsx со столбцами text и meta.
 
 Далее нужно сгенерировать опорники и их importance к каждому чанку:
 ```
-poetry run python src/scripts/process_chunks.py --input data/output.xlsx --output data/chunks_with_phrases.xlsx
+poetry run python src/scripts/process_chunks.py --input data/output.csv --output data/chunks_with_phrases.csv
 ```
 
 Теперь нужно загрузить данные в Chroma:
 ```
-poetry run python src/scripts/ingest_data.py --excel data/chunks_with_phrases.xlsx --collection bota_inik
+poetry run python src/scripts/ingest_data.py --csv data/chunks_with_phrases.csv --collection bota_inik
 ```
 После того, как бд готова
 
