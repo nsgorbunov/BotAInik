@@ -39,7 +39,7 @@ cd BotAInik
 ```
 poetry run python src/scripts/chunk_data.py --folder docs/ --output data/output.csv
 ```
-Это создаст data/output.xlsx со столбцами text и meta.
+Это создаст data/output.csv со столбцами text и meta.
 
 Далее нужно сгенерировать опорники и их importance к каждому чанку:
 ```
