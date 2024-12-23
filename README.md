@@ -1,5 +1,6 @@
 # BotAInik
 Бот для подготовки к собеседованиям
+![screen](https://github.com/user-attachments/assets/1b31580f-f19c-4b9d-a56c-d9ba266c3b4e)
 
 ## Данные
 
