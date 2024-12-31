@@ -21,6 +21,9 @@
 - **LLM**: Mistral Large
 - **Other**: FastAPI, JavaScript, HTML, CSS
 
+## Валидация
+
+![image](https://github.com/user-attachments/assets/debf7a5f-8964-48eb-8e68-f00a18a9334e)
 
 ## Как запустить?
 ```
